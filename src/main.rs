@@ -1,4 +1,4 @@
-use std::io::{ Error, ErrorKind };
+use std::io::{Error, ErrorKind};
 
 use log::*;
 use serde::Deserialize;
@@ -17,14 +17,26 @@ fn up(script: &Option<Script>) -> Result<(), Error> {
 /// Bring things down.
 fn down(script: &Option<DownScript>, status: Status) -> Result<(), Error> {
     match *script {
-        None => {},
+        None => {}
         Some(ref down_script) => {
             // First run on_failure/on_success.
             // Store errors for later.
             let result = match (status, down_script) {
-                (Status::Failure, DownScript {failure: Some(ref on_failure), ..}) => on_failure.run(),
-                (Status::Success, DownScript {success: Some(ref on_success), ..}) => on_success.run(),
-                _ => Ok(())
+                (
+                    Status::Failure,
+                    DownScript {
+                        failure: Some(ref on_failure),
+                        ..
+                    },
+                ) => on_failure.run(),
+                (
+                    Status::Success,
+                    DownScript {
+                        success: Some(ref on_success),
+                        ..
+                    },
+                ) => on_success.run(),
+                _ => Ok(()),
             };
             // Then run on_always.
             if let Some(ref on_always) = down_script.always {
@@ -46,15 +58,11 @@ fn run(script: &Option<Script>) -> Result<(), Error> {
     Ok(())
 }
 
-/// The command requested by the user
-#[derive(Deserialize, Clone, Copy)]
-enum Command {
-    #[serde(rename="up")]
-    Up,
-    #[serde(rename="down")]
-    Down,
-    #[serde(rename="run")]
-    Run
+#[derive(Debug)]
+struct Commands {
+    up: bool,
+    run: bool,
+    down: bool,
 }
 
 /// The result of the test, as seen by `down()`.
@@ -66,7 +74,7 @@ enum Status {
     Failure,
 
     /// The test was not executed at all, we just ran `mx-tester down`.
-    Manual
+    Manual,
 }
 
 #[derive(Deserialize)]
@@ -78,16 +86,21 @@ struct Script {
     ///
     /// To communicate with the script, clients should use
     /// an exchange file.
-    lines: Vec<String>
+    lines: Vec<String>,
 }
 impl Script {
     pub fn run(&self) -> Result<(), Error> {
         for line in &self.lines {
-            let status = std::process::Command::new(&line)
-                .spawn()?
-                .wait()?;
+            let status = std::process::Command::new(&line).spawn()?.wait()?;
             if !status.success() {
-                return Err(Error::new(ErrorKind::InvalidData, format!("Error running command `{line}`: {status}", line = line, status = status)))
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "Error running command `{line}`: {status}",
+                        line = line,
+                        status = status
+                    ),
+                ));
             }
         }
         Ok(())
@@ -105,16 +118,11 @@ struct DownScript {
     /// Code to run regardless of the result of the test.
     ///
     /// Executed after `success` or `failure`.
-    always: Option<Script>
+    always: Option<Script>,
 }
-
-
 
 #[derive(Deserialize)]
 struct Config {
-    /// If specified, a command to run if no command is passed.
-    default_command: Option<Command>,
-
     /// A script to run at the end of the setup phase.
     up: Option<Script>,
 
@@ -136,21 +144,21 @@ fn main() {
                 .short("c")
                 .long("config")
                 .default_value("mx-tester.yml")
-                .global(true)
-                .help("The file containing the test configuration, or mx-tester.yml if unspecified")
+                .help(
+                    "The file containing the test configuration, or mx-tester.yml if unspecified",
+                ),
         )
-        .subcommand(
-            SubCommand::with_name("up")
-        )
-        .subcommand(
-            SubCommand::with_name("down")
-        )
-        .subcommand(
-            SubCommand::with_name("run")
+        .arg(
+            Arg::with_name("command")
+                .multiple(true)
+                .takes_value(false)
+                .possible_values(&["up", "run", "down"])
+                .help("The list of commands to run. Order is ignored."),
         )
         .get_matches();
 
-    let config_path = matches.value_of("config")
+    let config_path = matches
+        .value_of("config")
         .expect("Missing value for `config`");
     let config_file = std::fs::File::open(config_path)
         .unwrap_or_else(|err| panic!("Could not open config file `{}`: {}", config_path, err));
@@ -158,32 +166,62 @@ fn main() {
     let config: Config = serde_yaml::from_reader(config_file)
         .unwrap_or_else(|err| panic!("Invalid config file `{}`: {}", config_path, err));
 
-    let command = match matches.subcommand_name() {
-        None => config.default_command.unwrap_or(Command::Run),
-        Some("run") => Command::Run,
-        Some("down") => Command::Down,
-        Some("up") => Command::Up,
-        _ => unreachable!()
+    let commands = match matches.values_of("command") {
+        None => Commands {
+            up: true,
+            run: true,
+            down: true,
+        },
+        Some(c) => {
+            let mut commands = Commands {
+                up: false,
+                run: false,
+                down: false,
+            };
+            for command in c {
+                match command {
+                    "up" => {
+                        commands.up = true;
+                    }
+                    "down" => {
+                        commands.down = true;
+                    }
+                    "run" => {
+                        commands.run = true;
+                    }
+                    _ => panic!("Invalid command `{}`", command),
+                }
+            }
+            commands
+        }
+    };
+    debug!("Running {:?}", commands);
+
+    // Now run the scripts.
+    // We stop immediately if `up` fails but if `run` fails,
+    // we may need to run some cleanup before stopping.
+    //
+    // FIXME: Is this the safest/least astonishing way of doing it?
+    if commands.up {
+        up(&config.up).expect("Error during setup");
     };
 
-    match command {
-        Command::Up => up(&config.up)
-            .unwrap(),
-        Command::Down => down(&config.down, Status::Manual)
-            .unwrap(),
-        Command::Run => {
-            // Always run the setup.
-            up(&config.up).expect("Error during setup");
+    let result_run = if commands.run {
+        run(&config.run)
+    } else {
+        Ok(())
+    };
+    let result_down = if commands.down {
+        let status = match (commands.run, &result_run) {
+            (false, _) => Status::Manual,
+            (_, &Ok(_)) => Status::Success,
+            (_, &Err(_)) => Status::Failure,
+        };
+        down(&config.down, status)
+    } else {
+        Ok(())
+    };
 
-            // Run the test.
-            let result = run(&config.run);
-            if result.is_err() {
-                warn!("Encountered an error during the test.");
-            }
-            let status = if result.is_ok() { Status::Success } else { Status::Failure };
-            let result_2 = down(&config.down, status);
-            result.expect("Error during test");
-            result_2.expect("Error during teardown");
-        }
-    }
+    result_run.expect("Error during test");
+    result_down.expect("Error during teardown");
 }
