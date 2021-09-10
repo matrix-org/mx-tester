@@ -3,16 +3,30 @@ use serde::Deserialize;
 
 use mx_tester::*;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Commands {
+    /// If `true`, execute build scripts.
+    build: bool,
+
+    /// If `true`, execute up scripts.
     up: bool,
+
+    /// If `true`, execute run scripts.
     run: bool,
+
+    /// If `true`, execute down scripts.
     down: bool,
 }
 
-
 #[derive(Debug, Default, Deserialize)]
 struct Config {
+    /// A name for this test.
+    name: String,
+
+    /// Modules to install in Synapse.
+    #[serde(default)]
+    modules: Vec<ModuleConfig>,
+
     #[serde(default)]
     /// A script to run at the end of the setup phase.
     up: Option<Script>,
@@ -43,7 +57,7 @@ fn main() {
             Arg::with_name("command")
                 .multiple(true)
                 .takes_value(false)
-                .possible_values(&["up", "run", "down"])
+                .possible_values(&["up", "run", "down", "build"])
                 .help("The list of commands to run. Order is ignored."),
         )
         .get_matches();
@@ -60,16 +74,13 @@ fn main() {
 
     let commands = match matches.values_of("command") {
         None => Commands {
+            build: false,
             up: true,
             run: true,
             down: true,
         },
         Some(c) => {
-            let mut commands = Commands {
-                up: false,
-                run: false,
-                down: false,
-            };
+            let mut commands = Commands::default();
             for command in c {
                 match command {
                     "up" => {
@@ -81,6 +92,9 @@ fn main() {
                     "run" => {
                         commands.run = true;
                     }
+                    "build" => {
+                        commands.build = true;
+                    }
                     _ => panic!("Invalid command `{}`", command),
                 }
             }
@@ -90,10 +104,14 @@ fn main() {
     debug!("Running {:?}", commands);
 
     // Now run the scripts.
-    // We stop immediately if `up` fails but if `run` fails,
+    // We stop immediately if `build` or `up` fails but if `run` fails,
     // we may need to run some cleanup before stopping.
     //
     // FIXME: Is this the safest/least astonishing way of doing it?
+
+    if commands.build {
+        build().expect("Error while building image");
+    }
     if commands.up {
         up(&config.up).expect("Error during setup");
     };

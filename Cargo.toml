@@ -23,3 +23,7 @@ dircpy = "0.3"
 # Logging
 env_logger = "0.9"
 log = "0.4"
+
+# Developer comfort
+itertools = "0.10"
+lazy_static = "1.4"
