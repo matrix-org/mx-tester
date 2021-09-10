@@ -39,7 +39,7 @@ fn down(script: &Option<DownScript>, status: Status) -> Result<(), Error> {
                 _ => Ok(()),
             };
             // Then run on_always.
-            if let Some(ref on_always) = down_script.always {
+            if let Some(ref on_always) = down_script.finally {
                 on_always.run()?;
             }
             // Report any error from `on_failure` or `on_success`.
@@ -77,7 +77,7 @@ enum Status {
     Manual,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(transparent)]
 struct Script {
     /// The lines of the script.
@@ -107,7 +107,7 @@ impl Script {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct DownScript {
     /// Code to run in case the test is a success.
     success: Option<Script>,
@@ -118,17 +118,20 @@ struct DownScript {
     /// Code to run regardless of the result of the test.
     ///
     /// Executed after `success` or `failure`.
-    always: Option<Script>,
+    finally: Option<Script>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct Config {
+    #[serde(default)]
     /// A script to run at the end of the setup phase.
     up: Option<Script>,
 
+    #[serde(default)]
     /// The testing script to run.
     run: Option<Script>,
 
+    #[serde(default)]
     /// A script to run at the start of the teardown phase.
     down: Option<DownScript>,
 }
@@ -144,9 +147,7 @@ fn main() {
                 .short("c")
                 .long("config")
                 .default_value("mx-tester.yml")
-                .help(
-                    "The file containing the test configuration, or mx-tester.yml if unspecified",
-                ),
+                .help("The file containing the test configuration."),
         )
         .arg(
             Arg::with_name("command")
@@ -165,6 +166,7 @@ fn main() {
 
     let config: Config = serde_yaml::from_reader(config_file)
         .unwrap_or_else(|err| panic!("Invalid config file `{}`: {}", config_path, err));
+    debug!("Config: {:2?}", config);
 
     let commands = match matches.values_of("command") {
         None => Commands {
