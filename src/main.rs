@@ -20,6 +20,7 @@ fn down(script: &Option<DownScript>, status: Status) -> Result<(), Error> {
         None => {},
         Some(ref down_script) => {
             // First run on_failure/on_success.
+            // Store errors for later.
             let result = match (status, down_script) {
                 (Status::Failure, DownScript {failure: Some(ref on_failure), ..}) => on_failure.run(),
                 (Status::Success, DownScript {success: Some(ref on_success), ..}) => on_success.run(),
@@ -29,6 +30,7 @@ fn down(script: &Option<DownScript>, status: Status) -> Result<(), Error> {
             if let Some(ref on_always) = down_script.always {
                 on_always.run()?;
             }
+            // Report any error from `on_failure` or `on_success`.
             result?
         }
     }
@@ -55,9 +57,15 @@ enum Command {
     Run
 }
 
+/// The result of the test, as seen by `down()`.
 enum Status {
+    /// The test was a success.
     Success,
+
+    /// The test was a failure.
     Failure,
+
+    /// The test was not executed at all, we just ran `mx-tester down`.
     Manual
 }
 
@@ -66,7 +74,10 @@ enum Status {
 struct Script {
     /// The lines of the script.
     ///
-    /// Passed as such to `std::process::Command`.
+    /// Passed without change to `std::process::Command`.
+    ///
+    /// To communicate with the script, clients should use
+    /// an exchange file.
     lines: Vec<String>
 }
 impl Script {
@@ -85,8 +96,15 @@ impl Script {
 
 #[derive(Deserialize)]
 struct DownScript {
+    /// Code to run in case the test is a success.
     success: Option<Script>,
+
+    /// Code to run in case the test is a failure.
     failure: Option<Script>,
+
+    /// Code to run regardless of the result of the test.
+    ///
+    /// Executed after `success` or `failure`.
     always: Option<Script>
 }
 
