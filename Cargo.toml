@@ -8,6 +8,7 @@ edition = "2018"
 [dependencies]
 # Command-line
 clap = "2.3"
+comma = "1.0.0"
 
 # Configuration
 serde = { version = "1.0", features = ["derive"] }

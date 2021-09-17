@@ -51,7 +51,7 @@ impl SynapseVersion {
     }
 }
 
-// FIXME: the lines of the script can't contain any arguments to that process at the moment.
+// FIXME: can't template environment variables from scripts at the moment.
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
 pub struct Script {
@@ -64,9 +64,19 @@ pub struct Script {
     lines: Vec<String>,
 }
 impl Script {
+    fn parse_command(&self, line: &str) -> Option<std::process::Command> {
+        let tokens = comma::parse_command(line)?;
+        let mut command = std::process::Command::new(OsString::from(tokens.get(0)?));
+        for token in tokens {
+            command.arg(token);
+        }
+        Some(command)
+    }
     pub fn run(&self, env: &HashMap<&'static OsStr, Cow<'_, OsStr>>) -> Result<(), Error> {
         for line in &self.lines {
-            let status = std::process::Command::new(&line)
+            let status = self
+                .parse_command(line)
+                .unwrap()
                 .envs(env)
                 .spawn()?
                 .wait()?;
