@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     ffi::{OsStr, OsString},
-    io::{Error, ErrorKind, Write},
+    io::{Error, ErrorKind},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -132,7 +132,6 @@ pub fn build(config: &[ModuleConfig], version: SynapseVersion) -> Result<(), Err
     let synapse_root = synapse_root();
     std::fs::create_dir_all(&synapse_root)
         .unwrap_or_else(|err| panic!("Cannot create directory {:?}: {}", synapse_root, err));
-    debug!("created the directory");
     // Build modules
     for module in config {
         let mut env: HashMap<&'static OsStr, _> = HashMap::with_capacity(1);
@@ -252,6 +251,8 @@ pub fn up_image(synapse_data_directory: &Path) -> Result<(), Error> {
         .arg(format!("GID={}", nix::unistd::getegid()));
     command
         .arg("--detach")
+        .arg("--name")
+        .arg("mx-tester_synapse")
         .arg("-p")
         .arg("9999:9999")
         .arg("-v")
@@ -292,6 +293,17 @@ pub fn up(
     unimplemented!()
 }
 
+/// Teardown a single image.
+pub fn down_image() {
+    let status = std::process::Command::new("docker")
+        .arg("stop")
+        .arg("mx-tester_synapse")
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .expect("Could not take down the synapse container");
+}
+
 /// Bring things down.
 pub fn down(
     version: SynapseVersion,
@@ -328,8 +340,9 @@ pub fn down(
             result?
         }
     }
-    // FIXME: Bring down Synapse.
-    unimplemented!()
+    debug!("Taking down synapse.");
+    down_image();
+    Ok(())
 }
 
 /// Run the testing script.

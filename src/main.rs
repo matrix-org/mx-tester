@@ -125,18 +125,17 @@ fn main() {
     } else {
         Ok(())
     };
-    /*     let result_down = if commands.down {
+    let result_down = if commands.down {
         let status = match (commands.run, &result_run) {
             (false, _) => Status::Manual,
             (_, &Ok(_)) => Status::Success,
             (_, &Err(_)) => Status::Failure,
         };
-        //down(&config.down, status)
-        Ok(())
+        down(SynapseVersion::ReleasedDockerImage, &config.down, status)
     } else {
         Ok(())
-    }; */
+    };
 
     result_run.expect("Error during test");
-    //result_down.expect("Error during teardown");
+    result_down.expect("Error during teardown");
 }
