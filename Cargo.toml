@@ -27,3 +27,6 @@ log = "0.4"
 # Developer comfort
 itertools = "0.10"
 lazy_static = "1.4"
+
+# Unix manipulation
+nix = "*"

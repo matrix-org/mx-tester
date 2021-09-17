@@ -2,13 +2,14 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     ffi::{OsStr, OsString},
-    io::{Error, ErrorKind},
-    path::PathBuf,
+    io::{Error, ErrorKind, Write},
+    path::{Path, PathBuf},
     str::FromStr,
 };
 
 use itertools::Itertools;
 use lazy_static::lazy_static;
+use log::debug;
 use serde::Deserialize;
 
 lazy_static! {
@@ -50,6 +51,7 @@ impl SynapseVersion {
     }
 }
 
+// FIXME: the lines of the script can't contain any arguments to that process at the moment.
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
 pub struct Script {
@@ -116,47 +118,49 @@ fn synapse_root() -> PathBuf {
 }
 
 /// Rebuild the Synapse image with modules.
-pub fn build(
-    config: &[ModuleConfig],
-    version: SynapseVersion,
-    modules: &[&str],
-) -> Result<(), Error> {
+pub fn build(config: &[ModuleConfig], version: SynapseVersion) -> Result<(), Error> {
     let synapse_root = synapse_root();
     std::fs::create_dir_all(&synapse_root)
         .unwrap_or_else(|err| panic!("Cannot create directory {:?}: {}", synapse_root, err));
-
+    debug!("created the directory");
     // Build modules
     for module in config {
         let mut env: HashMap<&'static OsStr, _> = HashMap::with_capacity(1);
         let path = synapse_root.join(&module.name);
         env.insert(&*MX_TEST_MODULE_DIR, path.as_os_str().into());
+        debug!(
+            "Calling build script with MX_TEST_DIR={:?}",
+            path.to_str().unwrap()
+        );
         module.build.run(&env)?;
+        debug!("Completed one module.");
     }
 
     // Prepare Dockerfile including modules.
     let dockerfile_content = format!("
-        # A custom Dockerfile to rebuild synapse from the official release + plugins
+# A custom Dockerfile to rebuild synapse from the official release + plugins
 
-        FROM matrixdotorg/synapse:latest
-        
-        # We need gcc to build pyahocorasick
-        RUN apt-get update --quiet && apt-get install gcc --yes --quiet
-        
-        # Show the Synapse version, to aid with debugging.
-        RUN pip show matrix-synapse
+FROM matrixdotorg/synapse:latest
 
-        # Copy and install custom modules.
-        RUN mkdir /mx-tester
-        {copy}
-        
-        VOLUME [\"/data\"]
-        
-        EXPOSE 8008/tcp 8009/tcp 8448/tcp
+# We need gcc to build pyahocorasick
+RUN apt-get update --quiet && apt-get install gcc --yes --quiet
+
+# Show the Synapse version, to aid with debugging.
+RUN pip show matrix-synapse
+
+# Copy and install custom modules.
+RUN mkdir /mx-tester
+{copy}
+
+VOLUME [\"/data\"]
+
+EXPOSE 8008/tcp 8009/tcp 8448/tcp
 ",
-    copy = modules.iter()
-        .map(|module| format!("COPY {module}, /mx-tester/{module}\n RUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module))
+    copy = config.iter()
+        .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
         .format("\n")
 );
+    debug!("dockerfile {}", dockerfile_content);
 
     let docker_dir_path = std::env::temp_dir().join("mx-tester").join("docker");
     std::fs::create_dir_all(&docker_dir_path).unwrap_or_else(|err| {
@@ -169,7 +173,7 @@ pub fn build(
     std::fs::write(&dockerfile_path, dockerfile_content)
         .unwrap_or_else(|err| panic!("Could not write file `{:?}`: {}", &dockerfile_path, err));
 
-    // Build docker image from the synapse root.
+    debug!("Building image with tag {:?}", version.tag());
     std::process::Command::new("docker")
         .arg("build")
         .args(["--pull", "--no-cache"])
@@ -184,12 +188,92 @@ pub fn build(
     Ok(())
 }
 
+/// Generate the data directory and apply the config
+pub fn generate(homeserver_config: &Path, synapse_data_directory: &Path) -> Result<(), Error> {
+    std::fs::copy(
+        homeserver_config,
+        synapse_data_directory.join("homeserver.yaml"),
+    )?;
+    let mut command = std::process::Command::new("docker");
+    command
+        .arg("run")
+        .arg("-e")
+        .arg("SYNAPSE_SERVER_NAME=localhost:8080")
+        .arg("-e")
+        .arg("SYNAPSE_REPORT_STATS=no")
+        .arg("-e")
+        .arg("SYNAPSE_CONFIG_DIR=/data");
+    #[cfg(unix)]
+    command
+        .arg("-e")
+        .arg(format!("UID={}", nix::unistd::getuid()))
+        .arg("-e")
+        .arg(format!("GID={}", nix::unistd::getegid()));
+    let output = command
+        .arg("-p")
+        .arg("9999:8080")
+        .arg("-v")
+        .arg(format!(
+            "{}:{}",
+            &synapse_data_directory.to_str().unwrap(),
+            "/data"
+        ))
+        .arg(&*PATCHED_IMAGE_DOCKER_TAG)
+        .arg("generate")
+        .output()
+        .expect("Could not generate synapse files");
+    debug!(
+        "generate missing config: {}\n{}",
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap()
+    );
+    Ok(())
+}
+
+/// Raise an image.
+pub fn up_image(synapse_data_directory: &Path) -> Result<(), Error> {
+    let mut command = std::process::Command::new("docker");
+    command.arg("run");
+    #[cfg(unix)]
+    command
+        .arg("-e")
+        .arg(format!("UID={}", nix::unistd::getuid()))
+        .arg("-e")
+        .arg(format!("GID={}", nix::unistd::getegid()));
+    command
+        .arg("--detach")
+        .arg("-p")
+        .arg("9999:9999")
+        .arg("-v")
+        .arg(format!(
+            "{}:{}",
+            &synapse_data_directory.to_str().unwrap(),
+            "/data"
+        ))
+        .arg(&*PATCHED_IMAGE_DOCKER_TAG);
+    let output = command.output().expect("Could not start image");
+    debug!(
+        "up_image {:?}: {}\n{}",
+        &*PATCHED_IMAGE_DOCKER_TAG,
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap()
+    );
+    Ok(())
+}
+
 /// Bring things up.
 pub fn up(
     version: SynapseVersion,
     script: &Option<Script>,
 ) -> Result<HashMap<&'static OsStr, OsString>, Error> {
+    debug!("generating synapse data");
     // FIXME: Up Synapse.
+    generate(
+        Path::new("./homeserver.yaml"),
+        Path::new("/tmp/mx-tester/synapse"),
+    )?;
+    debug!("done generating");
+    up_image(Path::new("/tmp/mx-tester/synapse"))?;
     // FIXME: If we have a token for an admin user, test it.
     // FIXME: Where should we store the token for the admin user? File storage? An embedded db?
     // FIXME: Note that we need to wait and retry, as bringing up Synapse can take a little time.

@@ -27,6 +27,9 @@ struct Config {
     #[serde(default)]
     modules: Vec<ModuleConfig>,
 
+    /// a path to the homeserver.yaml
+    homeserver: String,
+
     #[serde(default)]
     /// A script to run at the end of the setup phase.
     up: Option<Script>,
@@ -110,10 +113,11 @@ fn main() {
     // FIXME: Is this the safest/least astonishing way of doing it?
 
     if commands.build {
-        build().expect("Error while building image");
+        build(&config.modules, SynapseVersion::ReleasedDockerImage)
+            .expect("Error while building image");
     }
     if commands.up {
-        up(&config.up).expect("Error during setup");
+        up(SynapseVersion::ReleasedDockerImage, &config.up).expect("Error during setup");
     };
 
     let result_run = if commands.run {
@@ -121,17 +125,18 @@ fn main() {
     } else {
         Ok(())
     };
-    let result_down = if commands.down {
+    /*     let result_down = if commands.down {
         let status = match (commands.run, &result_run) {
             (false, _) => Status::Manual,
             (_, &Ok(_)) => Status::Success,
             (_, &Err(_)) => Status::Failure,
         };
-        down(&config.down, status)
+        //down(&config.down, status)
+        Ok(())
     } else {
         Ok(())
-    };
+    }; */
 
     result_run.expect("Error during test");
-    result_down.expect("Error during teardown");
+    //result_down.expect("Error during teardown");
 }
