@@ -64,6 +64,18 @@ pub struct Script {
     lines: Vec<String>,
 }
 impl Script {
+    fn subsitute_env_vars(
+        &self,
+        line: &str,
+        env: &HashMap<&'static OsStr, Cow<'_, OsStr>>,
+    ) -> String {
+        shellexpand::env_with_context_no_errors(line, |str| match env.get(OsStr::new(str)) {
+            Some(value) => value.to_str(),
+            _ => None,
+        })
+        // we copy because i can't figure out how to get the lifetimes right atm....
+        .to_string()
+    }
     fn parse_command(&self, line: &str) -> Option<std::process::Command> {
         let tokens = comma::parse_command(line)?;
         let mut token_stream = tokens.iter();
@@ -75,8 +87,9 @@ impl Script {
     }
     pub fn run(&self, env: &HashMap<&'static OsStr, Cow<'_, OsStr>>) -> Result<(), Error> {
         for line in &self.lines {
+            let line = self.subsitute_env_vars(line, env);
             let status = self
-                .parse_command(line)
+                .parse_command(&line)
                 .unwrap_or_else(|| panic!("Could not parse script line: {}", line))
                 .envs(env)
                 .spawn()?

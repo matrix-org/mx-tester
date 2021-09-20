@@ -9,6 +9,7 @@ edition = "2018"
 # Command-line
 clap = "2.3"
 comma = "1.0.0"
+shellexpand = "2.1"
 
 # Configuration
 serde = { version = "1.0", features = ["derive"] }
