@@ -226,6 +226,7 @@ pub fn generate(homeserver_config: &Path, synapse_data_directory: &Path) -> Resu
         homeserver_config,
         synapse_data_directory.join("homeserver.yaml"),
     )?;
+    // FIXME: I think we're creating tonnes of unnamed garbage containers each time we run this.
     let mut command = std::process::Command::new("docker");
     command
         .arg("run")
@@ -263,7 +264,17 @@ pub fn generate(homeserver_config: &Path, synapse_data_directory: &Path) -> Resu
 }
 
 /// Raise an image.
-pub fn up_image(synapse_data_directory: &Path) -> Result<(), Error> {
+pub fn up_image(synapse_data_directory: &Path, create_new_container: bool) -> Result<(), Error> {
+    let container_name = "mx-tester_synapse";
+    let container_up = is_container_up(container_name);
+    if container_up && create_new_container {
+        container_stop(container_name)
+    } else if container_up {
+        return Ok(());
+    }
+    if is_container_built(container_name) {
+        container_rm(container_name)
+    }
     let mut command = std::process::Command::new("docker");
     command.arg("run");
     #[cfg(unix)]
@@ -295,6 +306,63 @@ pub fn up_image(synapse_data_directory: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// Check whether a named container is currently up.
+pub fn is_container_up(container_name: &str) -> bool {
+    let mut command = std::process::Command::new("docker");
+    command
+        .arg("container")
+        .arg("ps")
+        .arg("--no-trunc")
+        .arg("--filter")
+        .arg(format!("name={}", container_name));
+    let output = command
+        .output()
+        .unwrap_or_else(|_| panic!("Could not check if container name={} is up", container_name));
+    debug!(
+        "is_container_up name={} output: {:?}",
+        container_name, output
+    );
+    let all_output =
+        String::from_utf8(output.stdout).expect("Invalid output from docker container ps.");
+    all_output.contains(container_name)
+}
+
+/// Check whether a container with this name has been built already.
+pub fn is_container_built(container_name: &str) -> bool {
+    let mut command = std::process::Command::new("docker");
+    command
+        .arg("container")
+        .arg("ls")
+        .arg("-a")
+        .arg("--no-trunc")
+        .arg("--filter")
+        .arg(format!("name={}", container_name));
+    let output = command.output().unwrap_or_else(|_| {
+        panic!(
+            "Could not check if container name={} exists",
+            container_name
+        )
+    });
+    debug!(
+        "is_container_built name={} output: {:?}",
+        container_name, output
+    );
+    let all_output =
+        String::from_utf8(output.stdout).expect("Invalid output from docker container ls.");
+    all_output.contains(container_name)
+}
+
+/// Remove the named container
+pub fn container_rm(container_name: &str) {
+    let mut command = std::process::Command::new("docker");
+    command
+        .arg("container")
+        .arg("rm")
+        .arg(container_name)
+        .output()
+        .unwrap_or_else(|_| panic!("Could not remove container: {}", container_name));
+}
+
 /// Bring things up.
 pub fn up(
     version: SynapseVersion,
@@ -307,7 +375,8 @@ pub fn up(
         Path::new("/tmp/mx-tester/synapse"),
     )?;
     debug!("done generating");
-    up_image(Path::new("/tmp/mx-tester/synapse"))?;
+    // FIXME: Change to true when the image has been rebuilt.
+    up_image(Path::new("/tmp/mx-tester/synapse"), false)?;
     // FIXME: If we have a token for an admin user, test it.
     // FIXME: Where should we store the token for the admin user? File storage? An embedded db?
     // FIXME: Note that we need to wait and retry, as bringing up Synapse can take a little time.
@@ -317,10 +386,10 @@ pub fn up(
 }
 
 /// Teardown a single image.
-pub fn down_image() {
+pub fn container_stop(container_name: &str) {
     let status = std::process::Command::new("docker")
         .arg("stop")
-        .arg("mx-tester_synapse")
+        .arg(container_name)
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .output()
@@ -364,7 +433,7 @@ pub fn down(
         }
     }
     debug!("Taking down synapse.");
-    down_image();
+    container_stop("mx-tester_synapse");
     Ok(())
 }
 
