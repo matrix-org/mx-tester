@@ -18,6 +18,11 @@ lazy_static! {
     /// Passed to `build` scripts.
     static ref MX_TEST_MODULE_DIR: OsString = OsString::from_str("MX_TEST_MODULE_DIR").unwrap();
 
+    /// Environment variable: the directory where the synapse modules are placed in sub directories.
+    ///
+    /// Passed to `build` scripts.
+    static ref MX_TEST_SYNAPSE_DIR: OsString = OsString::from_str("MX_TEST_SYNAPSE_DIR").unwrap();
+
 
     /// The docker tag used for the Synapse image we produce.
     static ref PATCHED_IMAGE_DOCKER_TAG: OsString = OsString::from_str("mx-tester/synapse").unwrap();
@@ -150,7 +155,10 @@ pub fn build(config: &[ModuleConfig], version: SynapseVersion) -> Result<(), Err
     for module in config {
         let mut env: HashMap<&'static OsStr, _> = HashMap::with_capacity(1);
         let path = synapse_root.join(&module.name);
+        // not sure how useful this is, since it can't be given as a directory
+        // to cp, it should really be given the parent directory.
         env.insert(&*MX_TEST_MODULE_DIR, path.as_os_str().into());
+        env.insert(&*MX_TEST_SYNAPSE_DIR, synapse_root.as_os_str().into());
         debug!(
             "Calling build script for module {} with MX_TEST_DIR={:?}",
             &module.name,
