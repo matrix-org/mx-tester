@@ -66,8 +66,9 @@ pub struct Script {
 impl Script {
     fn parse_command(&self, line: &str) -> Option<std::process::Command> {
         let tokens = comma::parse_command(line)?;
-        let mut command = std::process::Command::new(OsString::from(tokens.get(0)?));
-        for token in tokens {
+        let mut token_stream = tokens.iter();
+        let mut command = std::process::Command::new(OsString::from(token_stream.next()?));
+        for token in token_stream {
             command.arg(token);
         }
         Some(command)
@@ -76,7 +77,7 @@ impl Script {
         for line in &self.lines {
             let status = self
                 .parse_command(line)
-                .unwrap()
+                .unwrap_or_else(|| panic!("Could not parse script line: {}", line))
                 .envs(env)
                 .spawn()?
                 .wait()?;
@@ -138,7 +139,8 @@ pub fn build(config: &[ModuleConfig], version: SynapseVersion) -> Result<(), Err
         let path = synapse_root.join(&module.name);
         env.insert(&*MX_TEST_MODULE_DIR, path.as_os_str().into());
         debug!(
-            "Calling build script with MX_TEST_DIR={:?}",
+            "Calling build script for module {} with MX_TEST_DIR={:?}",
+            &module.name,
             path.to_str().unwrap()
         );
         module.build.run(&env)?;
