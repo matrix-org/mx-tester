@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     ffi::{OsStr, OsString},
-    io::{Error, ErrorKind},
+    io::{Error, ErrorKind, LineWriter, Write},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -221,11 +221,7 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
 }
 
 /// Generate the data directory and apply the config
-pub fn generate(homeserver_config: &Path, synapse_data_directory: &Path) -> Result<(), Error> {
-    std::fs::copy(
-        homeserver_config,
-        synapse_data_directory.join("homeserver.yaml"),
-    )?;
+pub fn generate(synapse_data_directory: &Path) -> Result<(), Error> {
     // FIXME: I think we're creating tonnes of unnamed garbage containers each time we run this.
     let mut command = std::process::Command::new("docker");
     command
@@ -367,16 +363,20 @@ pub fn container_rm(container_name: &str) {
 pub fn up(
     version: SynapseVersion,
     script: &Option<Script>,
+    homeserver_config: serde_yaml::Mapping,
 ) -> Result<HashMap<&'static OsStr, OsString>, Error> {
+    let synapse_data_directory = Path::new("/tmp/mx-tester/synapse");
     debug!("generating synapse data");
     // FIXME: Up Synapse.
-    generate(
-        Path::new("./homeserver.yaml"),
-        Path::new("/tmp/mx-tester/synapse"),
-    )?;
+    generate(synapse_data_directory)?;
     debug!("done generating");
-    // FIXME: Change to true when the image has been rebuilt.
-    up_image(Path::new("/tmp/mx-tester/synapse"), false)?;
+    // Apply config from mx-tester.yml to the homeserver.yaml that was just made
+    update_homeserver_config_with_config(
+        &synapse_data_directory.join("homeserver.yaml"),
+        homeserver_config,
+    );
+    // FIXME: Allow configuration of recreating container if the image has been rebuilt.
+    up_image(Path::new(synapse_data_directory), false)?;
     // FIXME: If we have a token for an admin user, test it.
     // FIXME: Where should we store the token for the admin user? File storage? An embedded db?
     // FIXME: Note that we need to wait and retry, as bringing up Synapse can take a little time.
@@ -446,4 +446,53 @@ pub fn run(script: &Option<Script>) -> Result<(), Error> {
         code.run(&env)?;
     }
     Ok(())
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListenerResourcesConfig {
+    names: Vec<String>,
+    compress: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListenerConfig {
+    port: u32,
+    tls: bool,
+    #[serde(rename = "type")]
+    kind: String,
+    x_forwarded: bool,
+    resources: ListenerResourcesConfig,
+}
+
+pub fn update_homeserver_config_with_config(
+    target_homeserver_config: &Path,
+    homeserver_config: serde_yaml::Mapping,
+) {
+    let config_file = std::fs::File::open(target_homeserver_config).unwrap_or_else(|err| {
+        panic!(
+            "Could not open config file `{:?}`: {}",
+            target_homeserver_config, err
+        )
+    });
+
+    let mut combined_config: serde_yaml::Mapping = serde_yaml::from_reader(config_file)
+        .unwrap_or_else(|err| {
+            panic!(
+                "Invalid config file `{:?}`: {}",
+                target_homeserver_config, err
+            )
+        });
+
+    for (key, value) in homeserver_config {
+        combined_config.insert(key, value);
+    }
+    let mut config_writer = LineWriter::new(
+        std::fs::File::create(&target_homeserver_config).expect("Could not open homeserver.yaml"),
+    );
+    config_writer
+        .write_all(
+            &serde_yaml::to_vec(&combined_config)
+                .expect("Could not serialize combined homeserver config"),
+        )
+        .expect("Could not write to homeserver.yaml");
 }

@@ -1,7 +1,7 @@
 use log::*;
-use serde::Deserialize;
-
 use mx_tester::*;
+use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Default)]
 struct Commands {
@@ -27,8 +27,8 @@ struct Config {
     #[serde(default)]
     modules: Vec<ModuleConfig>,
 
-    /// a path to the homeserver.yaml
-    homeserver: String,
+    /// Values to pass through into the homserver.yaml for this synapse.
+    homeserver_config: serde_yaml::Mapping,
 
     #[serde(default)]
     /// A script to run at the end of the setup phase.
@@ -117,7 +117,12 @@ fn main() {
             .expect("Error while building image");
     }
     if commands.up {
-        up(SynapseVersion::ReleasedDockerImage, &config.up).expect("Error during setup");
+        up(
+            SynapseVersion::ReleasedDockerImage,
+            &config.up,
+            config.homeserver_config,
+        )
+        .expect("Error during setup");
     };
 
     let result_run = if commands.run {
