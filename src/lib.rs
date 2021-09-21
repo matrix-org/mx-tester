@@ -9,7 +9,7 @@ use std::{
 
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use log::debug;
+use log::{debug, warn};
 use serde::Deserialize;
 
 lazy_static! {
@@ -56,7 +56,6 @@ impl SynapseVersion {
     }
 }
 
-// FIXME: can't template environment variables from scripts at the moment.
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
 pub struct Script {
@@ -69,18 +68,20 @@ pub struct Script {
     lines: Vec<String>,
 }
 impl Script {
-    fn subsitute_env_vars(
-        &self,
-        line: &str,
-        env: &HashMap<&'static OsStr, Cow<'_, OsStr>>,
-    ) -> String {
+    /// Substitute anything that looks like the use of environment variable such as $A or ${B} using the entries to the hash map provided.
+    /// If there is no matching table entry for $FOO then it will remain as $FOO in the script line. 
+    fn substitute_env_vars<'a>
+    (
+        line: &'a str,
+        env: &HashMap<&'static OsStr, Cow<'a, OsStr>>,
+    ) -> Cow::<'a, str> {
         shellexpand::env_with_context_no_errors(line, |str| match env.get(OsStr::new(str)) {
             Some(value) => value.to_str(),
             _ => None,
         })
-        // we copy because i can't figure out how to get the lifetimes right atm....
-        .to_string()
     }
+    /// Parse a line of script into a std::process::Command and its arguments.
+    /// Returns None when there is no command token in the line (e.g. just whitespace).
     fn parse_command(&self, line: &str) -> Option<std::process::Command> {
         let tokens = comma::parse_command(line)?;
         let mut token_stream = tokens.iter();
@@ -92,10 +93,12 @@ impl Script {
     }
     pub fn run(&self, env: &HashMap<&'static OsStr, Cow<'_, OsStr>>) -> Result<(), Error> {
         for line in &self.lines {
-            let line = self.subsitute_env_vars(line, env);
-            let status = self
-                .parse_command(&line)
-                .unwrap_or_else(|| panic!("Could not parse script line: {}", line))
+            let line = Script::substitute_env_vars(line, env);
+            let mut command = match self.parse_command(&line) {
+                Some(command) => command,
+                None => {warn!("SKipping empty line in script {:?}", self.lines); continue}
+            };
+            let status = command
                 .envs(env)
                 .spawn()?
                 .wait()?;
@@ -189,6 +192,7 @@ VOLUME [\"/data\"]
 EXPOSE 8008/tcp 8009/tcp 8448/tcp
 ",
     copy = config.iter()
+        // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
         .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
         .format("\n")
 );
@@ -220,18 +224,21 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
     Ok(())
 }
 
-/// Generate the data directory and apply the config
-pub fn generate(synapse_data_directory: &Path) -> Result<(), Error> {
+/// Generate the data directory and default synapse configuration.
+fn generate(synapse_data_directory: &Path) -> Result<(), Error> {
     // FIXME: I think we're creating tonnes of unnamed garbage containers each time we run this.
     let mut command = std::process::Command::new("docker");
     command
         .arg("run")
         .arg("-e")
+        // FIXME: Use server name from config.
         .arg("SYNAPSE_SERVER_NAME=localhost:8080")
         .arg("-e")
         .arg("SYNAPSE_REPORT_STATS=no")
         .arg("-e")
         .arg("SYNAPSE_CONFIG_DIR=/data");
+    // Ensure that the config files and media can be deleted by the user
+    // who launched the program by giving synapse the same uid/gid.
     #[cfg(unix)]
     command
         .arg("-e")
@@ -260,7 +267,7 @@ pub fn generate(synapse_data_directory: &Path) -> Result<(), Error> {
 }
 
 /// Raise an image.
-pub fn up_image(synapse_data_directory: &Path, create_new_container: bool) -> Result<(), Error> {
+fn up_image(synapse_data_directory: &Path, create_new_container: bool) -> Result<(), Error> {
     let container_name = "mx-tester_synapse";
     let container_up = is_container_up(container_name);
     if container_up && create_new_container {
@@ -273,6 +280,8 @@ pub fn up_image(synapse_data_directory: &Path, create_new_container: bool) -> Re
     }
     let mut command = std::process::Command::new("docker");
     command.arg("run");
+    // Ensure that the config files and media can be deleted by the user
+    // who launched the program by giving synapse the same uid/gid.
     #[cfg(unix)]
     command
         .arg("-e")
@@ -302,8 +311,8 @@ pub fn up_image(synapse_data_directory: &Path, create_new_container: bool) -> Re
     Ok(())
 }
 
-/// Check whether a named container is currently up.
-pub fn is_container_up(container_name: &str) -> bool {
+/// Check whether the named container is currently up.
+fn is_container_up(container_name: &str) -> bool {
     let mut command = std::process::Command::new("docker");
     command
         .arg("container")
@@ -324,7 +333,7 @@ pub fn is_container_up(container_name: &str) -> bool {
 }
 
 /// Check whether a container with this name has been built already.
-pub fn is_container_built(container_name: &str) -> bool {
+fn is_container_built(container_name: &str) -> bool {
     let mut command = std::process::Command::new("docker");
     command
         .arg("container")
@@ -348,8 +357,8 @@ pub fn is_container_built(container_name: &str) -> bool {
     all_output.contains(container_name)
 }
 
-/// Remove the named container
-pub fn container_rm(container_name: &str) {
+/// Remove the named container.
+fn container_rm(container_name: &str) {
     let mut command = std::process::Command::new("docker");
     command
         .arg("container")
@@ -359,7 +368,7 @@ pub fn container_rm(container_name: &str) {
         .unwrap_or_else(|_| panic!("Could not remove container: {}", container_name));
 }
 
-/// Bring things up.
+/// Bring things up. Returns any environment variables to pass to the run script.
 pub fn up(
     version: SynapseVersion,
     script: &Option<Script>,
@@ -367,7 +376,6 @@ pub fn up(
 ) -> Result<HashMap<&'static OsStr, OsString>, Error> {
     let synapse_data_directory = Path::new("/tmp/mx-tester/synapse");
     debug!("generating synapse data");
-    // FIXME: Up Synapse.
     generate(synapse_data_directory)?;
     debug!("done generating");
     // Apply config from mx-tester.yml to the homeserver.yaml that was just made
@@ -382,10 +390,10 @@ pub fn up(
     // FIXME: Note that we need to wait and retry, as bringing up Synapse can take a little time.
     // FIXME: If we have no token or the token is invalid, create an admin user.
     // FIXME: If the configuration states that we need to run an `up` script, run it.
-    unimplemented!()
+    Ok(HashMap::new())
 }
 
-/// Teardown a single image.
+/// Stop a container.
 pub fn container_stop(container_name: &str) {
     let status = std::process::Command::new("docker")
         .arg("stop")
@@ -448,29 +456,15 @@ pub fn run(script: &Option<Script>) -> Result<(), Error> {
     Ok(())
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub struct ListenerResourcesConfig {
-    names: Vec<String>,
-    compress: bool,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct ListenerConfig {
-    port: u32,
-    tls: bool,
-    #[serde(rename = "type")]
-    kind: String,
-    x_forwarded: bool,
-    resources: ListenerResourcesConfig,
-}
-
-pub fn update_homeserver_config_with_config(
+/// Update the homserver.yaml at the given path (usually one that has been generated by synapse)
+/// with the properties in the provided serde_yaml::Mapping (which will usually be provided from mx-tester.yaml)
+fn update_homeserver_config_with_config(
     target_homeserver_config: &Path,
     homeserver_config: serde_yaml::Mapping,
 ) {
     let config_file = std::fs::File::open(target_homeserver_config).unwrap_or_else(|err| {
         panic!(
-            "Could not open config file `{:?}`: {}",
+            "Could not open the homeserver.yaml that was generated by synapse `{:?}`: {}",
             target_homeserver_config, err
         )
     });
@@ -478,7 +472,7 @@ pub fn update_homeserver_config_with_config(
     let mut combined_config: serde_yaml::Mapping = serde_yaml::from_reader(config_file)
         .unwrap_or_else(|err| {
             panic!(
-                "Invalid config file `{:?}`: {}",
+                "The homeserver.yaml generated by synapse is invalid `{:?}`: {}",
                 target_homeserver_config, err
             )
         });
@@ -487,12 +481,12 @@ pub fn update_homeserver_config_with_config(
         combined_config.insert(key, value);
     }
     let mut config_writer = LineWriter::new(
-        std::fs::File::create(&target_homeserver_config).expect("Could not open homeserver.yaml"),
+        std::fs::File::create(&target_homeserver_config).expect("Could not write to the homeserver.yaml that was generated by synapse"),
     );
     config_writer
         .write_all(
             &serde_yaml::to_vec(&combined_config)
                 .expect("Could not serialize combined homeserver config"),
         )
-        .expect("Could not write to homeserver.yaml");
+        .expect("Could not overwrite the homeserver.yaml that was generated by synapse.");
 }

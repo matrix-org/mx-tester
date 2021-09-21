@@ -1,7 +1,6 @@
 use log::*;
 use mx_tester::*;
 use serde::Deserialize;
-use std::collections::HashMap;
 
 #[derive(Debug, Default)]
 struct Commands {
