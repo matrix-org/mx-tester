@@ -4,6 +4,7 @@ description = "A tool to help test Matrix bots and Synapse modules."
 version = "0.1.0"
 edition = "2018"
 license = "Apache-2.0"
+repository = "https://github.com/matrix-org/mx-tester"
 
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
