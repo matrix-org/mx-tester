@@ -35,4 +35,4 @@ itertools = "0.10"
 lazy_static = "1.4"
 
 # Unix manipulation
-nix = "*"
+nix = "0.22.1"
