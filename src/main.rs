@@ -1,7 +1,20 @@
-use log::*;
-use serde::Deserialize;
+// Copyright 2021 The Matrix.org Foundation C.I.C.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
+use log::*;
 use mx_tester::*;
+use serde::Deserialize;
 
 #[derive(Debug, Default)]
 struct Commands {
@@ -26,6 +39,9 @@ struct Config {
     /// Modules to install in Synapse.
     #[serde(default)]
     modules: Vec<ModuleConfig>,
+
+    /// Values to pass through into the homserver.yaml for this synapse.
+    homeserver_config: serde_yaml::Mapping,
 
     #[serde(default)]
     /// A script to run at the end of the setup phase.
@@ -110,10 +126,16 @@ fn main() {
     // FIXME: Is this the safest/least astonishing way of doing it?
 
     if commands.build {
-        build().expect("Error while building image");
+        build(&config.modules, SynapseVersion::ReleasedDockerImage)
+            .expect("Error while building image");
     }
     if commands.up {
-        up(&config.up).expect("Error during setup");
+        up(
+            SynapseVersion::ReleasedDockerImage,
+            &config.up,
+            config.homeserver_config,
+        )
+        .expect("Error during setup");
     };
 
     let result_run = if commands.run {
@@ -127,7 +149,7 @@ fn main() {
             (_, &Ok(_)) => Status::Success,
             (_, &Err(_)) => Status::Failure,
         };
-        down(&config.down, status)
+        down(SynapseVersion::ReleasedDockerImage, &config.down, status)
     } else {
         Ok(())
     };

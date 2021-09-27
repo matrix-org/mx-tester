@@ -1,13 +1,18 @@
 [package]
 name = "mx-tester"
+description = "A tool to help test Matrix bots and Synapse modules."
 version = "0.1.0"
 edition = "2018"
+license = "Apache-2.0"
+
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 # Command-line
 clap = "2.3"
+comma = "1.0.0"
+shellexpand = "2.1"
 
 # Configuration
 serde = { version = "1.0", features = ["derive"] }
@@ -27,3 +32,6 @@ log = "0.4"
 # Developer comfort
 itertools = "0.10"
 lazy_static = "1.4"
+
+# Unix manipulation
+nix = "*"
