@@ -57,32 +57,24 @@ pub struct DockerConfig {
     /// A docker network to run the synape containers on.
     /// If the network does not exist it will be created.
     /// If a network is provided, the synapse container will be given the hostname `synapse`.
+    /// Defaults to None.
     pub docker_network: Option<String>,
 
     /// The hostname to give the synapse container on the docker network, if the docker network has been provided.
-    #[serde(default = "DockerConfig::hostname_default")]
+    /// Defaults to `synapse` but will not be used unless a network is provided in docker_network.
     pub hostname: String,
 
-    #[serde(default = "DockerConfig::port_mapping_default")]
     /// The docker port mapping configuration to use for the synapse container e.g. `9999:9999`.
+    /// Defaults to 9999:9999
     pub port_mapping: String,
-}
-
-impl DockerConfig {
-    fn hostname_default() -> String {
-        "synapse".to_string()
-    }
-    fn port_mapping_default() -> String {
-        "9999:9999".to_string()
-    }
 }
 
 impl Default for DockerConfig {
     fn default() -> DockerConfig {
         DockerConfig {
             docker_network: None,
-            hostname: DockerConfig::hostname_default(),
-            port_mapping: DockerConfig::port_mapping_default(),
+            hostname: "synapse".to_string(),
+            port_mapping: "9999:9999".to_string(),
         }
     }
 }
@@ -97,7 +89,7 @@ pub struct Config {
     #[serde(default)]
     pub modules: Vec<ModuleConfig>,
 
-    /// Values to pass through into the homserver.yaml for this synapse.
+    /// Values to pass through into the homeserver.yaml for this synapse.
     pub homeserver_config: serde_yaml::Mapping,
 
     #[serde(default)]
@@ -113,7 +105,7 @@ pub struct Config {
     pub down: Option<DownScript>,
 
     #[serde(default)]
-    /// Where to configure the ports to expose for synapse, hostname and the network.
+    /// Configuration for the docker network.
     pub docker_config: DockerConfig,
 }
 
@@ -145,15 +137,44 @@ impl SynapseVersion {
 /// The configuration for a single synapse container.
 /// We copy some fields from the main config because they
 /// are otherwise without the context we want to use them for, which
-/// is managing the docker container, not deserializing a homserver config.
+/// is managing the docker container, not deserializing a homeserver config.
 #[derive(Debug)]
 pub struct ContainerConfig {
-    /// The docker port configuration.
+    /// The docker port configuration. e.g. `9999:9999`.
     pub port_mapping: String,
     /// The hostname of the synapse container.
     pub hostname: String,
     /// The name of a docker network to place the container in.
     pub docker_network: Option<String>,
+    /// The URL that can be used to access this container from the host.
+    pub public_url: String,
+    /// The name of the synapse server.
+    pub server_name: String,
+}
+
+impl ContainerConfig {
+    pub fn from_mx_tester_config(config: &Config) -> ContainerConfig {
+        let homeserver_config = &config.homeserver_config;
+        ContainerConfig {
+            docker_network: config.docker_config.docker_network.clone(),
+            port_mapping: config.docker_config.port_mapping.clone(),
+            hostname: config.docker_config.hostname.clone(),
+            public_url: homeserver_config
+                .get(&serde_yaml::Value::from("public_baseurl"))
+                .unwrap_or_else(|| {
+                    panic!("Could not get the public_baseurl from the homeserver_config")
+                })
+                .as_str()
+                .unwrap()
+                .to_string(),
+            server_name: homeserver_config
+                .get(&serde_yaml::Value::from("server_name"))
+                .unwrap_or_else(|| panic!("Could not get server_name from homeserver config"))
+                .as_str()
+                .unwrap()
+                .to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,14 +370,21 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
 }
 
 /// Generate the data directory and default synapse configuration.
-fn generate(synapse_data_directory: &Path) -> Result<(), Error> {
+fn generate(
+    synapse_root_directory: &Path,
+    container_config: &ContainerConfig,
+) -> Result<(), Error> {
+    let synapse_data_directory = synapse_root_directory.join("data");
     // FIXME: I think we're creating tonnes of unnamed garbage containers each time we run this.
     let mut command = std::process::Command::new("docker");
     command
         .arg("run")
         .arg("-e")
         // FIXME: Use server name from config.
-        .arg("SYNAPSE_SERVER_NAME=localhost:8080")
+        .arg(format!(
+            "SYNAPSE_SERVER_NAME={}",
+            container_config.server_name
+        ))
         .arg("-e")
         .arg("SYNAPSE_REPORT_STATS=no")
         .arg("-e")
@@ -371,7 +399,7 @@ fn generate(synapse_data_directory: &Path) -> Result<(), Error> {
         .arg(format!("GID={}", nix::unistd::getegid()));
     let output = command
         .arg("-p")
-        .arg("9999:8080")
+        .arg(&container_config.port_mapping)
         .arg("-v")
         .arg(format!(
             "{}:/data",
@@ -556,7 +584,7 @@ pub fn up(
         ensure_network_exists(container_config.docker_network.as_ref().unwrap())?;
     }
     debug!("generating synapse data");
-    generate(&synapse_data_directory)?;
+    generate(&synapse_data_directory, &container_config)?;
     debug!("done generating");
     // Apply config from mx-tester.yml to the homeserver.yaml that was just made
     update_homeserver_config_with_config(
@@ -642,7 +670,7 @@ pub fn run(script: &Option<Script>) -> Result<(), Error> {
     Ok(())
 }
 
-/// Update the homserver.yaml at the given path (usually one that has been generated by synapse)
+/// Update the homeserver.yaml at the given path (usually one that has been generated by synapse)
 /// with the properties in the provided serde_yaml::Mapping (which will usually be provided from mx-tester.yaml)
 fn update_homeserver_config_with_config(
     target_homeserver_config: &Path,

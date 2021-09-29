@@ -56,11 +56,7 @@ fn main() {
     debug!("Config: {:2?}", config);
 
     // Extract container config from the docker config and the homeserver config.
-    let container_config = ContainerConfig {
-        docker_network: config.docker_config.docker_network,
-        port_mapping: config.docker_config.port_mapping,
-        hostname: config.docker_config.hostname,
-    };
+    let container_config = ContainerConfig::from_mx_tester_config(&config);
 
     let commands = match matches.values_of("command") {
         None => vec![Command::Up, Command::Run, Command::Down],
