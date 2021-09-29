@@ -24,10 +24,14 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Error};
+use hmac::{Hmac, Mac, NewMac};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
+use sha1::Sha1;
+
+type HmacSha1 = Hmac<Sha1>;
 
 lazy_static! {
     /// Environment variable: the directory where a given module should be copied.
@@ -49,6 +53,10 @@ lazy_static! {
     ///
     /// Passed to `build`, `up`, `run`, `down` scripts.
     static ref MX_TEST_CWD: OsString = OsString::from_str("MX_TEST_CWD").unwrap();
+    /// Environment variable: An access token that can be used to login as an admin user.
+    ///
+    /// Passed to `run` scripts.
+    static ref MX_TEST_ADMIN: OsString = OsString::from_str("MX_TEST_ADMIN").unwrap();
 
     /// The docker tag used for the Synapse image we produce.
     static ref PATCHED_IMAGE_DOCKER_TAG: OsString = OsString::from_str("mx-tester/synapse").unwrap();
@@ -160,6 +168,10 @@ pub struct Config {
     #[serde(default)]
     /// Configuration for the docker network.
     pub docker_config: DockerConfig,
+    /// FIXME: not sure if this should just be a boolean
+    /// The mxid of an admin user to create, provided as an access token
+    /// to run.
+    admin_user: Option<String>,
 }
 
 /// The result of the test, as seen by `down()`.
@@ -721,11 +733,38 @@ pub fn down(
     Ok(())
 }
 
+async fn load_or_create_admin_token(
+    base_url: &str,
+    registaration_shared_secret: String,
+    admin_id: String,
+) -> RegistrationResponse {
+    register_user(
+        base_url,
+        registaration_shared_secret,
+        admin_id,
+        "Irrelevant hopefully".to_string(),
+        "admin".to_string(),
+        true,
+    )
+    .await
+    .expect("Couldn't create a new admin user")
+}
+
 /// Run the testing script.
-pub fn run(script: &Option<Script>) -> Result<(), Error> {
+pub async fn run(script: &Option<Script>) -> Result<(), Error> {
     if let Some(ref code) = script {
-        let env = shared_env_variables()?;
+        let mut env = shared_env_variables()?;
         // FIXME: Load the token, etc. from disk storage.
+        let user_details = load_or_create_admin_token(
+            "http://localhost:9999",
+            "REGISTRATION_SHARED_SECRET".to_string(),
+            "admin".to_string(),
+        )
+        .await;
+        env.insert(
+            &*MX_TEST_ADMIN,
+            OsStr::new(&user_details.access_token).into(),
+        );
         code.run(&env).context("Error running `run` script")?;
     }
     Ok(())

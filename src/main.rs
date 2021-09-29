@@ -25,7 +25,8 @@ enum Command {
     Down,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     use clap::*;
     env_logger::init();
     let matches = App::new("mx-tester")
@@ -105,7 +106,7 @@ fn main() {
             }
             Command::Run => {
                 info!("mx-tester run...");
-                result_run = Some(run(&config.run));
+                result_run = Some(run(&config.run).await);
             }
             Command::Down => {
                 info!("mx-tester down...");
