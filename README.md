@@ -49,14 +49,27 @@ modules:
       - # ...
       - # env: MX_TEST_MODULE_DIR -- where the module should be copied
       - # env: MX_TEST_SYNAPSE_DIR -- where Synapse source lies
+      - # env: MX_TEST_SCRIPT_TMPDIR -- a temporary directory where the test can
+      - #   write data. Note that `mx-tester` will NOT clear this directory.
+      - # env: MX_TEST_CWD -- the directory in which the test was launched.
   - # Other modules, if necessary.
 up: # Optionally, a script to be executed at the end of `mx-tester up`
   - # Use this script e.g. to setup additional components, such as bots.
+  -
+  - # env: MX_TEST_SCRIPT_TMPDIR -- a temporary directory where the test can
+  - #   write data. Note that `mx-tester` will NOT clear this directory.
+  - # env: MX_TEST_CWD -- the directory in which the test was launched.
 run: # Optionally, a script to be executed as `mx-tester run`
   - # Use this script e.g. to start your tests.
+  - # env: MX_TEST_SCRIPT_TMPDIR -- a temporary directory where the test can
+  - #   write data. Note that `mx-tester` will NOT clear this directory.
+  - # env: MX_TEST_CWD -- the directory in which the test was launched.
 down: # Optionally, a script to be executed at the start of `mx-tester down`
       # Use this script e.g. to teardown additional components, such as bots.
     success: # Optionally, a script to be executed if `run` was a success. -- NOT IMPLEMENTED YET
     failure: # Optionally, a script to be executed if `run` was a failure. -- NOT IMPLEMENTED YET
     finally: # Optionally, a script to be executed regardless of the result of `run`.
+      - # env: MX_TEST_SCRIPT_TMPDIR -- a temporary directory where the test can
+      - #   write data. Note that `mx-tester` will NOT clear this directory.
+      - # env: MX_TEST_CWD -- the directory in which the test was launched.
 ```

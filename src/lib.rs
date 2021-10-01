@@ -37,12 +37,18 @@ lazy_static! {
     /// Passed to `build` scripts.
     static ref MX_TEST_SYNAPSE_DIR: OsString = OsString::from_str("MX_TEST_SYNAPSE_DIR").unwrap();
 
+    /// Environment variable: a temporary directory where scripts can store data.
+    ///
+    /// Passed to `build`, `up`, `run`, `down` scripts.
+    static ref MX_TEST_SCRIPT_TMPDIR: OsString = OsString::from_str("MX_TEST_SCRIPT_TMPDIR").unwrap();
+
+    /// Environment variable: the directory where we launched the test.
+    ///
+    /// Passed to `build`, `up`, `run`, `down` scripts.
+    static ref MX_TEST_CWD: OsString = OsString::from_str("MX_TEST_CWD").unwrap();
 
     /// The docker tag used for the Synapse image we produce.
     static ref PATCHED_IMAGE_DOCKER_TAG: OsString = OsString::from_str("mx-tester/synapse").unwrap();
-
-    /// An empty environment.
-    static ref EMPTY_ENV: HashMap<&'static OsStr, Cow<'static, OsStr>> = HashMap::new();
 }
 
 /// The result of the test, as seen by `down()`.
@@ -83,12 +89,11 @@ pub struct Script {
 }
 impl Script {
     /// Substitute anything that looks like the use of environment variable such as $A or ${B} using the entries to the hash map provided.
-    /// If there is no matching table entry for $FOO then it will remain as $FOO in the script line. 
-    fn substitute_env_vars<'a>
-    (
+    /// If there is no matching table entry for $FOO then it will remain as $FOO in the script line.
+    fn substitute_env_vars<'a>(
         line: &'a str,
-        env: &HashMap<&'static OsStr, Cow<'a, OsStr>>,
-    ) -> Cow::<'a, str> {
+        env: &HashMap<&'static OsStr, OsString>,
+    ) -> Cow<'a, str> {
         shellexpand::env_with_context_no_errors(line, |str| match env.get(OsStr::new(str)) {
             Some(value) => value.to_str(),
             _ => None,
@@ -105,17 +110,17 @@ impl Script {
         }
         Some(command)
     }
-    pub fn run(&self, env: &HashMap<&'static OsStr, Cow<'_, OsStr>>) -> Result<(), Error> {
+    pub fn run(&self, env: &HashMap<&'static OsStr, OsString>) -> Result<(), Error> {
         for line in &self.lines {
             let line = Script::substitute_env_vars(line, env);
             let mut command = match self.parse_command(&line) {
                 Some(command) => command,
-                None => {warn!("SKipping empty line in script {:?}", self.lines); continue}
+                None => {
+                    warn!("SKipping empty line in script {:?}", self.lines);
+                    continue;
+                }
             };
-            let status = command
-                .envs(env)
-                .spawn()?
-                .wait()?;
+            let status = command.envs(env).spawn()?.wait()?;
             if !status.success() {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
@@ -159,6 +164,32 @@ pub struct DownScript {
     finally: Option<Script>,
 }
 
+/// Create a map containing the environment variables that are common
+/// to all scripts.
+///
+/// Callers may add additional variables that are specific to a given
+/// script step.
+fn shared_env_variables() -> Result<HashMap<&'static OsStr, OsString>, Error> {
+    let synapse_root = synapse_root();
+    let script_tmpdir = std::env::temp_dir().join("mx-tester").join("scripts");
+    std::fs::create_dir_all(&script_tmpdir).map_err(|err| {
+        Error::new(
+            err.kind(),
+            format!(
+                "Could not create directory {:?}: {}",
+                script_tmpdir.as_os_str(),
+                err
+            ),
+        )
+    })?;
+    let curdir = std::env::current_dir()?;
+    let mut env: HashMap<&'static OsStr, _> = HashMap::new();
+    env.insert(&*MX_TEST_SYNAPSE_DIR, synapse_root.as_os_str().into());
+    env.insert(&*MX_TEST_SCRIPT_TMPDIR, script_tmpdir.as_os_str().into());
+    env.insert(&*MX_TEST_CWD, curdir.as_os_str().into());
+    Ok(env)
+}
+
 fn synapse_root() -> PathBuf {
     std::env::temp_dir().join("mx-tester").join("synapse")
 }
@@ -169,15 +200,12 @@ pub fn build(config: &[ModuleConfig], version: SynapseVersion) -> Result<(), Err
     std::fs::create_dir_all(&synapse_root)
         .unwrap_or_else(|err| panic!("Cannot create directory {:?}: {}", synapse_root, err));
     // Build modules
+    let mut env = shared_env_variables()?;
     for module in config {
-        let mut env: HashMap<&'static OsStr, _> = HashMap::with_capacity(1);
         let path = synapse_root.join(&module.name);
-        // not sure how useful this is, since it can't be given as a directory
-        // to cp, it should really be given the parent directory.
         env.insert(&*MX_TEST_MODULE_DIR, path.as_os_str().into());
-        env.insert(&*MX_TEST_SYNAPSE_DIR, synapse_root.as_os_str().into());
         debug!(
-            "Calling build script for module {} with MX_TEST_DIR={:?}",
+            "Calling build script for module {} with MX_TEST_MODULE_DIR={:?}",
             &module.name,
             path.to_str().unwrap()
         );
@@ -239,7 +267,8 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
 }
 
 /// Generate the data directory and default synapse configuration.
-fn generate(synapse_data_directory: &Path) -> Result<(), Error> {
+fn generate(synapse_root_directory: &Path) -> Result<(), Error> {
+    let synapse_data_directory = synapse_root_directory.join("data");
     // FIXME: I think we're creating tonnes of unnamed garbage containers each time we run this.
     let mut command = std::process::Command::new("docker");
     command
@@ -263,11 +292,7 @@ fn generate(synapse_data_directory: &Path) -> Result<(), Error> {
         .arg("-p")
         .arg("9999:8080")
         .arg("-v")
-        .arg(format!(
-            "{}:{}",
-            &synapse_data_directory.to_str().unwrap(),
-            "/data"
-        ))
+        .arg(synapse_data_directory)
         .arg(&*PATCHED_IMAGE_DOCKER_TAG)
         .arg("generate")
         .output()
@@ -387,24 +412,28 @@ pub fn up(
     version: SynapseVersion,
     script: &Option<Script>,
     homeserver_config: serde_yaml::Mapping,
-) -> Result<HashMap<&'static OsStr, OsString>, Error> {
-    let synapse_data_directory = Path::new("/tmp/mx-tester/synapse");
+) -> Result<(), Error> {
+    let synapse_root_directory = synapse_root();
     debug!("generating synapse data");
-    generate(synapse_data_directory)?;
+    generate(&synapse_root_directory)?;
     debug!("done generating");
     // Apply config from mx-tester.yml to the homeserver.yaml that was just made
     update_homeserver_config_with_config(
-        &synapse_data_directory.join("homeserver.yaml"),
+        &synapse_root_directory.join("homeserver.yaml"),
         homeserver_config,
     );
     // FIXME: Allow configuration of recreating container if the image has been rebuilt.
-    up_image(Path::new(synapse_data_directory), false)?;
+    up_image(&synapse_root_directory, false)?;
     // FIXME: If we have a token for an admin user, test it.
     // FIXME: Where should we store the token for the admin user? File storage? An embedded db?
     // FIXME: Note that we need to wait and retry, as bringing up Synapse can take a little time.
     // FIXME: If we have no token or the token is invalid, create an admin user.
-    // FIXME: If the configuration states that we need to run an `up` script, run it.
-    Ok(HashMap::new())
+
+    if let Some(ref script) = script {
+        let env = shared_env_variables()?;
+        script.run(&env)?;
+    }
+    Ok(())
 }
 
 /// Stop a container.
@@ -424,35 +453,33 @@ pub fn down(
     script: &Option<DownScript>,
     status: Status,
 ) -> Result<(), Error> {
-    match *script {
-        None => {}
-        Some(ref down_script) => {
-            // First run on_failure/on_success.
-            // Store errors for later.
-            let result = match (status, down_script) {
-                (
-                    Status::Failure,
-                    DownScript {
-                        failure: Some(ref on_failure),
-                        ..
-                    },
-                ) => on_failure.run(&*EMPTY_ENV),
-                (
-                    Status::Success,
-                    DownScript {
-                        success: Some(ref on_success),
-                        ..
-                    },
-                ) => on_success.run(&*EMPTY_ENV),
-                _ => Ok(()),
-            };
-            // Then run on_always.
-            if let Some(ref on_always) = down_script.finally {
-                on_always.run(&*EMPTY_ENV)?;
-            }
-            // Report any error from `on_failure` or `on_success`.
-            result?
+    if let Some(ref down_script) = *script {
+        let env = shared_env_variables()?;
+        // First run on_failure/on_success.
+        // Store errors for later.
+        let result = match (status, down_script) {
+            (
+                Status::Failure,
+                DownScript {
+                    failure: Some(ref on_failure),
+                    ..
+                },
+            ) => on_failure.run(&env),
+            (
+                Status::Success,
+                DownScript {
+                    success: Some(ref on_success),
+                    ..
+                },
+            ) => on_success.run(&env),
+            _ => Ok(()),
+        };
+        // Then run on_always.
+        if let Some(ref on_always) = down_script.finally {
+            on_always.run(&env)?;
         }
+        // Report any error from `on_failure` or `on_success`.
+        result?
     }
     debug!("Taking down synapse.");
     container_stop("mx-tester_synapse");
@@ -462,9 +489,8 @@ pub fn down(
 /// Run the testing script.
 pub fn run(script: &Option<Script>) -> Result<(), Error> {
     if let Some(ref code) = script {
-        let mut env = HashMap::new();
+        let env = shared_env_variables()?;
         // FIXME: Load the token, etc. from disk storage.
-        // FIXME: Pass the real environment
         code.run(&env)?;
     }
     Ok(())
@@ -495,7 +521,8 @@ fn update_homeserver_config_with_config(
         combined_config.insert(key, value);
     }
     let mut config_writer = LineWriter::new(
-        std::fs::File::create(&target_homeserver_config).expect("Could not write to the homeserver.yaml that was generated by synapse"),
+        std::fs::File::create(&target_homeserver_config)
+            .expect("Could not write to the homeserver.yaml that was generated by synapse"),
     );
     config_writer
         .write_all(
