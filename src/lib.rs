@@ -116,7 +116,7 @@ impl Script {
             let mut command = match self.parse_command(&line) {
                 Some(command) => command,
                 None => {
-                    warn!("SKipping empty line in script {:?}", self.lines);
+                    warn!("Skipping empty line in script {:?}", self.lines);
                     continue;
                 }
             };
@@ -205,7 +205,7 @@ pub fn build(config: &[ModuleConfig], version: SynapseVersion) -> Result<(), Err
         let path = synapse_root.join(&module.name);
         env.insert(&*MX_TEST_MODULE_DIR, path.as_os_str().into());
         debug!(
-            "Calling build script for module {} with MX_TEST_MODULE_DIR={:?}",
+            "Calling build script for module {} with MX_TEST_DIR={:?}",
             &module.name,
             path.to_str().unwrap()
         );
