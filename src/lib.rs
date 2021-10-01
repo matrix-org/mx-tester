@@ -267,8 +267,7 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
 }
 
 /// Generate the data directory and default synapse configuration.
-fn generate(synapse_root_directory: &Path) -> Result<(), Error> {
-    let synapse_data_directory = synapse_root_directory.join("data");
+fn generate(synapse_data_directory: &Path) -> Result<(), Error> {
     // FIXME: I think we're creating tonnes of unnamed garbage containers each time we run this.
     let mut command = std::process::Command::new("docker");
     command
@@ -292,7 +291,10 @@ fn generate(synapse_root_directory: &Path) -> Result<(), Error> {
         .arg("-p")
         .arg("9999:8080")
         .arg("-v")
-        .arg(synapse_data_directory)
+        .arg(format!(
+            "{}:/data",
+            &synapse_data_directory.to_str().unwrap()
+        ))
         .arg(&*PATCHED_IMAGE_DOCKER_TAG)
         .arg("generate")
         .output()
@@ -413,17 +415,23 @@ pub fn up(
     script: &Option<Script>,
     homeserver_config: serde_yaml::Mapping,
 ) -> Result<(), Error> {
-    let synapse_root_directory = synapse_root();
+    let synapse_data_directory = synapse_root().join("data");
+    std::fs::create_dir_all(&synapse_data_directory).unwrap_or_else(|err| {
+        panic!(
+            "Cannot create directory {:?}: {}",
+            synapse_data_directory, err
+        )
+    });
     debug!("generating synapse data");
-    generate(&synapse_root_directory)?;
+    generate(&synapse_data_directory)?;
     debug!("done generating");
     // Apply config from mx-tester.yml to the homeserver.yaml that was just made
     update_homeserver_config_with_config(
-        &synapse_root_directory.join("homeserver.yaml"),
+        &synapse_data_directory.join("homeserver.yaml"),
         homeserver_config,
     );
     // FIXME: Allow configuration of recreating container if the image has been rebuilt.
-    up_image(&synapse_root_directory, false)?;
+    up_image(&synapse_data_directory, false)?;
     // FIXME: If we have a token for an admin user, test it.
     // FIXME: Where should we store the token for the admin user? File storage? An embedded db?
     // FIXME: Note that we need to wait and retry, as bringing up Synapse can take a little time.
