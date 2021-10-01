@@ -16,19 +16,12 @@ use log::*;
 use mx_tester::*;
 use serde::Deserialize;
 
-#[derive(Debug, Default)]
-struct Commands {
-    /// If `true`, execute build scripts.
-    build: bool,
-
-    /// If `true`, execute up scripts.
-    up: bool,
-
-    /// If `true`, execute run scripts.
-    run: bool,
-
-    /// If `true`, execute down scripts.
-    down: bool,
+#[derive(Debug)]
+enum Command {
+    Build,
+    Up,
+    Run,
+    Down,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -74,7 +67,7 @@ fn main() {
                 .multiple(true)
                 .takes_value(false)
                 .possible_values(&["up", "run", "down", "build"])
-                .help("The list of commands to run. Order is ignored."),
+                .help("The list of commands to run. Order matters and the same command may be repeated."),
         )
         .get_matches();
 
@@ -89,33 +82,16 @@ fn main() {
     debug!("Config: {:2?}", config);
 
     let commands = match matches.values_of("command") {
-        None => Commands {
-            build: false,
-            up: true,
-            run: true,
-            down: true,
-        },
-        Some(c) => {
-            let mut commands = Commands::default();
-            for command in c {
-                match command {
-                    "up" => {
-                        commands.up = true;
-                    }
-                    "down" => {
-                        commands.down = true;
-                    }
-                    "run" => {
-                        commands.run = true;
-                    }
-                    "build" => {
-                        commands.build = true;
-                    }
-                    _ => panic!("Invalid command `{}`", command),
-                }
-            }
-            commands
-        }
+        None => vec![Command::Up, Command::Run, Command::Down],
+        Some(values) => values
+            .map(|command| match command {
+                "up" => Command::Up,
+                "down" => Command::Down,
+                "run" => Command::Run,
+                "build" => Command::Build,
+                _ => panic!("Invalid command `{}`", command),
+            })
+            .collect(),
     };
     debug!("Running {:?}", commands);
 
@@ -125,35 +101,40 @@ fn main() {
     //
     // FIXME: Is this the safest/least astonishing way of doing it?
 
-    if commands.build {
-        build(&config.modules, SynapseVersion::ReleasedDockerImage)
-            .expect("Error while building image");
+    // Store the results of a `run` command in case it's followed by
+    // a `down` command, which needs to decide between a success path
+    // and a failure path.
+    let mut result_run = None;
+    for command in commands {
+        match command {
+            Command::Build => {
+                build(&config.modules, SynapseVersion::ReleasedDockerImage)
+                    .expect("Error in `build`");
+            }
+            Command::Up => {
+                up(
+                    SynapseVersion::ReleasedDockerImage,
+                    &config.up,
+                    &config.homeserver_config,
+                )
+                .expect("Error in `up`");
+            }
+            Command::Run => {
+                result_run = Some(run(&config.run));
+            }
+            Command::Down => {
+                let status = match result_run {
+                    None => Status::Manual,
+                    Some(Ok(_)) => Status::Success,
+                    Some(Err(_)) => Status::Failure,
+                };
+                let result_down = down(SynapseVersion::ReleasedDockerImage, &config.down, status);
+                if let Some(result_run) = result_run {
+                    result_run.expect("Error in `up`");
+                }
+                result_run = None;
+                result_down.expect("Error during teardown");
+            }
+        }
     }
-    if commands.up {
-        up(
-            SynapseVersion::ReleasedDockerImage,
-            &config.up,
-            config.homeserver_config,
-        )
-        .expect("Error during setup");
-    };
-
-    let result_run = if commands.run {
-        run(&config.run)
-    } else {
-        Ok(())
-    };
-    let result_down = if commands.down {
-        let status = match (commands.run, &result_run) {
-            (false, _) => Status::Manual,
-            (_, &Ok(_)) => Status::Success,
-            (_, &Err(_)) => Status::Failure,
-        };
-        down(SynapseVersion::ReleasedDockerImage, &config.down, status)
-    } else {
-        Ok(())
-    };
-
-    result_run.expect("Error during test");
-    result_down.expect("Error during teardown");
 }

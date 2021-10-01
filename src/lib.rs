@@ -413,7 +413,7 @@ fn container_rm(container_name: &str) {
 pub fn up(
     version: SynapseVersion,
     script: &Option<Script>,
-    homeserver_config: serde_yaml::Mapping,
+    homeserver_config: &serde_yaml::Mapping,
 ) -> Result<(), Error> {
     let synapse_data_directory = synapse_root().join("data");
     std::fs::create_dir_all(&synapse_data_directory).unwrap_or_else(|err| {
@@ -508,7 +508,7 @@ pub fn run(script: &Option<Script>) -> Result<(), Error> {
 /// with the properties in the provided serde_yaml::Mapping (which will usually be provided from mx-tester.yaml)
 fn update_homeserver_config_with_config(
     target_homeserver_config: &Path,
-    homeserver_config: serde_yaml::Mapping,
+    homeserver_config: &serde_yaml::Mapping,
 ) {
     let config_file = std::fs::File::open(target_homeserver_config).unwrap_or_else(|err| {
         panic!(
@@ -526,7 +526,7 @@ fn update_homeserver_config_with_config(
         });
 
     for (key, value) in homeserver_config {
-        combined_config.insert(key, value);
+        combined_config.insert(key.clone(), value.clone());
     }
     let mut config_writer = LineWriter::new(
         std::fs::File::create(&target_homeserver_config)
