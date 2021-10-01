@@ -47,6 +47,8 @@ struct Config {
     #[serde(default)]
     /// A script to run at the start of the teardown phase.
     down: Option<DownScript>,
+
+    postgres: Option<PostgresConfig>
 }
 
 fn main() {
@@ -112,6 +114,9 @@ fn main() {
                     .expect("Error in `build`");
             }
             Command::Up => {
+                if config.postgres.is_some() {
+                    up_postgres(config.postgres.unwrap()).expect("Error starting postgres");
+                }
                 up(
                     SynapseVersion::ReleasedDockerImage,
                     &config.up,
