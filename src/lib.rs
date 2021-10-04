@@ -51,6 +51,32 @@ lazy_static! {
     static ref PATCHED_IMAGE_DOCKER_TAG: OsString = OsString::from_str("mx-tester/synapse").unwrap();
 }
 
+/// The contents of a mx-tester.yaml
+#[derive(Debug, Default, Deserialize)]
+pub struct Config {
+    /// A name for this test.
+    pub name: String,
+
+    /// Modules to install in Synapse.
+    #[serde(default)]
+    pub modules: Vec<ModuleConfig>,
+
+    /// Values to pass through into the homserver.yaml for this synapse.
+    pub homeserver_config: serde_yaml::Mapping,
+
+    #[serde(default)]
+    /// A script to run at the end of the setup phase.
+    pub up: Option<Script>,
+
+    #[serde(default)]
+    /// The testing script to run.
+    pub run: Option<Script>,
+
+    #[serde(default)]
+    /// A script to run at the start of the teardown phase.
+    pub down: Option<DownScript>,
+}
+
 /// The result of the test, as seen by `down()`.
 pub enum Status {
     /// The test was a success.
@@ -195,7 +221,9 @@ fn synapse_root() -> PathBuf {
 }
 
 /// Rebuild the Synapse image with modules.
-pub fn build(config: &[ModuleConfig], version: SynapseVersion) -> Result<(), Error> {
+pub fn build(config: &[ModuleConfig], version: &SynapseVersion) -> Result<(), Error> {
+    // This will break (on purpose) once we extend `SynapseVersion`.
+    let SynapseVersion::ReleasedDockerImage = *version;
     let synapse_root = synapse_root();
     std::fs::create_dir_all(&synapse_root)
         .unwrap_or_else(|err| panic!("Cannot create directory {:?}: {}", synapse_root, err));
@@ -411,10 +439,13 @@ fn container_rm(container_name: &str) {
 
 /// Bring things up. Returns any environment variables to pass to the run script.
 pub fn up(
-    version: SynapseVersion,
+    version: &SynapseVersion,
     script: &Option<Script>,
     homeserver_config: &serde_yaml::Mapping,
 ) -> Result<(), Error> {
+    // This will break (on purpose) once we extend `SynapseVersion`.
+    let SynapseVersion::ReleasedDockerImage = *version;
+
     let synapse_data_directory = synapse_root().join("data");
     std::fs::create_dir_all(&synapse_data_directory).unwrap_or_else(|err| {
         panic!(
@@ -446,21 +477,26 @@ pub fn up(
 
 /// Stop a container.
 pub fn container_stop(container_name: &str) {
-    let status = std::process::Command::new("docker")
+    std::process::Command::new("docker")
         .arg("stop")
         .arg(container_name)
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
-        .output()
-        .expect("Could not take down the synapse container");
+        .spawn()
+        .expect("Could not take down the synapse container (could not launch)")
+        .wait()
+        .expect("Could not take down the synapse container (error in dockerland)");
 }
 
 /// Bring things down.
 pub fn down(
-    version: SynapseVersion,
+    version: &SynapseVersion,
     script: &Option<DownScript>,
     status: Status,
 ) -> Result<(), Error> {
+    // This will break (on purpose) once we extend `SynapseVersion`.
+    let SynapseVersion::ReleasedDockerImage = *version;
+
     if let Some(ref down_script) = *script {
         let env = shared_env_variables()?;
         // First run on_failure/on_success.
