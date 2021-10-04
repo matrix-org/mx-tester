@@ -14,7 +14,6 @@
 
 use log::*;
 use mx_tester::*;
-use serde::Deserialize;
 
 #[derive(Debug)]
 enum Command {
@@ -22,31 +21,6 @@ enum Command {
     Up,
     Run,
     Down,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct Config {
-    /// A name for this test.
-    name: String,
-
-    /// Modules to install in Synapse.
-    #[serde(default)]
-    modules: Vec<ModuleConfig>,
-
-    /// Values to pass through into the homserver.yaml for this synapse.
-    homeserver_config: serde_yaml::Mapping,
-
-    #[serde(default)]
-    /// A script to run at the end of the setup phase.
-    up: Option<Script>,
-
-    #[serde(default)]
-    /// The testing script to run.
-    run: Option<Script>,
-
-    #[serde(default)]
-    /// A script to run at the start of the teardown phase.
-    down: Option<DownScript>,
 }
 
 fn main() {
@@ -101,6 +75,8 @@ fn main() {
     //
     // FIXME: Is this the safest/least astonishing way of doing it?
 
+    let synapse_version = SynapseVersion::ReleasedDockerImage;
+
     // Store the results of a `run` command in case it's followed by
     // a `down` command, which needs to decide between a success path
     // and a failure path.
@@ -108,27 +84,25 @@ fn main() {
     for command in commands {
         match command {
             Command::Build => {
-                build(&config.modules, SynapseVersion::ReleasedDockerImage)
-                    .expect("Error in `build`");
+                info!("mx-tester build...");
+                build(&config.modules, &synapse_version).expect("Error in `build`");
             }
             Command::Up => {
-                up(
-                    SynapseVersion::ReleasedDockerImage,
-                    &config.up,
-                    &config.homeserver_config,
-                )
-                .expect("Error in `up`");
+                info!("mx-tester up...");
+                up(&synapse_version, &config.up, &config.homeserver_config).expect("Error in `up`");
             }
             Command::Run => {
+                info!("mx-tester run...");
                 result_run = Some(run(&config.run));
             }
             Command::Down => {
+                info!("mx-tester down...");
                 let status = match result_run {
                     None => Status::Manual,
                     Some(Ok(_)) => Status::Success,
                     Some(Err(_)) => Status::Failure,
                 };
-                let result_down = down(SynapseVersion::ReleasedDockerImage, &config.down, status);
+                let result_down = down(&synapse_version, &config.down, status);
                 if let Some(result_run) = result_run {
                     result_run.expect("Error in `up`");
                 }
