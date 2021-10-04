@@ -48,7 +48,8 @@ struct Config {
     /// A script to run at the start of the teardown phase.
     down: Option<DownScript>,
 
-    postgres: Option<PostgresConfig>
+    /// Optional configuration to run a postgres container alongside synapse.
+    postgres: Option<PostgresConfig>,
 }
 
 fn main() {
@@ -114,9 +115,7 @@ fn main() {
                     .expect("Error in `build`");
             }
             Command::Up => {
-                if config.postgres.is_some() {
-                    up_postgres(config.postgres.unwrap()).expect("Error starting postgres");
-                }
+                up_postgres(&config.postgres).expect("Could not start postgres.");
                 up(
                     SynapseVersion::ReleasedDockerImage,
                     &config.up,

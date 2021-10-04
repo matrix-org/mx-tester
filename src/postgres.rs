@@ -7,6 +7,4 @@ pub struct PostgresConfig {
 
     /// Any volumes to mount, in the format of host:guest.
     volumes: Vec<String>,
-
-
 }

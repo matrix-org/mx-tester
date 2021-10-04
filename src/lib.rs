@@ -328,8 +328,10 @@ fn up_image(synapse_data_directory: &Path, create_new_container: bool) -> Result
         container_rm(container_name)
     }
     let mut command = std::process::Command::new("docker");
-    command.arg("run")
-    .arg("--network").arg(&*MX_TEST_DOCKER_NETWORK);
+    command
+        .arg("run")
+        .arg("--network")
+        .arg(&*MX_TEST_DOCKER_NETWORK);
     // Ensure that the config files and media can be deleted by the user
     // who launched the program by giving synapse the same uid/gid.
     #[cfg(unix)]
@@ -590,7 +592,7 @@ fn update_homeserver_config_with_config(
 // FIXME: All docker related things should be moved to docker.rs
 // Then postgres stuff can be moved to postgres.rs
 /// An optional configuration to setup a postgres container that is networked with synapse.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct PostgresConfig {
     /// Any ports to expose in the format of pppp:pppp (host:guest) like docker
     ports: Vec<String>,
@@ -602,16 +604,18 @@ pub struct PostgresConfig {
     volumes: Vec<String>,
 
     /// A hostname for the postgres container to expose to the docker network.
-    hostname: String
+    hostname: String,
 }
 
 /// Raise a postgres container
-pub fn up_postgres(config: PostgresConfig) -> Result<(), Error> {
+pub fn up_postgres(config: &Option<PostgresConfig>) -> Result<(), Error> {
     ensure_network_exists(&*MX_TEST_DOCKER_NETWORK);
     let container_name = "mx-tester_postgres";
-    if is_container_up(container_name) {
+    if is_container_up(container_name) || config.is_none() {
         return Ok(());
     }
+    // Feel like I've made a mess of this.
+    let config = config.as_ref().unwrap().clone();
     // Instead of having the config in /tmp/ we could ask for them to provide it and write the volumes as absloute idk.
     let postgres_data_directory = postgres_root().join("data");
     std::fs::create_dir_all(&postgres_data_directory).unwrap_or_else(|err| {
@@ -621,23 +625,24 @@ pub fn up_postgres(config: PostgresConfig) -> Result<(), Error> {
         )
     });
     let mut command = std::process::Command::new("docker");
-    command.arg("run")
-    .arg("--network").arg(&*MX_TEST_DOCKER_NETWORK)
-    .arg("--hostname").arg(config.hostname);
-    for environment_variable in config.environment {
+    command
+        .arg("run")
+        .arg("--network")
+        .arg(&*MX_TEST_DOCKER_NETWORK)
+        .arg("--hostname")
+        .arg(&config.hostname);
+    for environment_variable in &config.environment {
         command.arg("-e").arg(environment_variable);
     }
     command
         .arg("--detach")
         .arg("--name")
         .arg("mx-tester_postgres");
-    for port_mapping in config.ports {
-        command.arg("-p")
-        .arg(port_mapping);
+    for port_mapping in &config.ports {
+        command.arg("-p").arg(port_mapping);
     }
-    for volume in config.volumes {
-    command.arg("-v")
-        .arg(volume);
+    for volume in &config.volumes {
+        command.arg("-v").arg(volume);
     }
     command.arg(&*POSTGRES_IMAGE_DOCKER_TAG);
     let output = command.output().expect("Could not start image");
