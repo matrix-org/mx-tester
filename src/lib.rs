@@ -420,7 +420,8 @@ fn container_rm(container_name: &str) {
         .unwrap_or_else(|_| panic!("Could not remove container: {}", container_name));
 }
 
-fn network_create(network_name: &str) {
+/// Create a docker network and give a name.
+fn create_network(network_name: &str) {
     let mut command = std::process::Command::new("docker");
     command
         .arg("network")
@@ -430,6 +431,7 @@ fn network_create(network_name: &str) {
         .unwrap_or_else(|e| panic!("Could not create docker network: {}, {}", network_name, e));
 }
 
+/// Check if the named docker network has previously been created.  
 fn is_network_created(network_name: &str) -> bool {
     let mut command = std::process::Command::new("docker");
     command
@@ -450,9 +452,10 @@ fn is_network_created(network_name: &str) -> bool {
     all_output.contains(network_name)
 }
 
+/// Ensure the named docker network exists.
 fn ensure_network_exists(network_name: &str) {
     if !is_network_created(network_name) {
-        network_create(network_name);
+        create_network(network_name);
     }
 }
 
@@ -594,7 +597,7 @@ fn update_homeserver_config_with_config(
 /// An optional configuration to setup a postgres container that is networked with synapse.
 #[derive(Debug, Deserialize, Clone)]
 pub struct PostgresConfig {
-    /// Any ports to expose in the format of pppp:pppp (host:guest) like docker
+    /// Any ports to expose in the format of pppp:pppp (host:guest) like docker.
     ports: Vec<String>,
 
     /// Any environment variables to give to postgres.
@@ -607,7 +610,7 @@ pub struct PostgresConfig {
     hostname: String,
 }
 
-/// Raise a postgres container
+/// Raise a postgres container.
 pub fn up_postgres(config: &Option<PostgresConfig>) -> Result<(), Error> {
     ensure_network_exists(&*MX_TEST_DOCKER_NETWORK);
     let container_name = "mx-tester_postgres";

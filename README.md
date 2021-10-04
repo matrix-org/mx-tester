@@ -73,3 +73,24 @@ down: # Optionally, a script to be executed at the start of `mx-tester down`
       - #   write data. Note that `mx-tester` will NOT clear this directory.
       - # env: MX_TEST_CWD -- the directory in which the test was launched.
 ```
+
+## Using postgres with Synapse.
+
+Add something like the following to your mx-tester.yml
+
+```
+postgres:
+  hostname: postgres
+  ports:
+    - "5433:5432"
+  volumes:
+    - /tmp/mx-tester/postgres/data:/var/lib/postgresql/data
+    - /tmp/mx-tester/postgres/pg_hba.conf:/var/lib/postgresql/data/pg_hba.conf
+    - /tmp/mx-tester/postgres/postgresql.conf:/var/lib/postgresql/data/postgresql.conf
+  environment:
+    - "POSTGRES_PASSWORD=test1234"
+    - "POSTGRES_USER=synapse_user"
+    - "POSTGRES_DB=synapse"
+    - "PGDATA=/var/lib/postgresql/data/pgdata"
+    - "POSTGRES_INITDB_ARGS=--lc-collate=C --lc-ctype=C --encoding=UTF8"
+```
