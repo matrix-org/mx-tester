@@ -75,6 +75,11 @@ pub struct Config {
     #[serde(default)]
     /// A script to run at the start of the teardown phase.
     pub down: Option<DownScript>,
+
+    /// A docker network to run the synape containers on.
+    /// If the network does not exist it will be created.
+    /// If a network is provided, the synapse container will be given the hostname `synapse`.
+    pub docker_network: Option<String>
 }
 
 /// The result of the test, as seen by `down()`.
@@ -335,8 +340,9 @@ fn generate(synapse_data_directory: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Raise an image.
-fn up_image(synapse_data_directory: &Path, create_new_container: bool) -> Result<(), Error> {
+/// Ensures that a container is running for the synapse image.
+/// If a network is provided then the container will be given the hostname `synapse`.
+fn up_image(synapse_data_directory: &Path, network: &Option<String>, create_new_container: bool) -> Result<(), Error> {
     let container_name = "mx-tester_synapse";
     let container_up = is_container_up(container_name);
     if container_up && create_new_container {
@@ -349,6 +355,13 @@ fn up_image(synapse_data_directory: &Path, create_new_container: bool) -> Result
     }
     let mut command = std::process::Command::new("docker");
     command.arg("run");
+    if network.is_some() {
+        command
+        .arg("--network")
+        .arg(network.as_ref().unwrap())
+        .arg("--hostname")
+        .arg("synapse");
+    }
     // Ensure that the config files and media can be deleted by the user
     // who launched the program by giving synapse the same uid/gid.
     #[cfg(unix)]
@@ -437,10 +450,50 @@ fn container_rm(container_name: &str) {
         .unwrap_or_else(|_| panic!("Could not remove container: {}", container_name));
 }
 
+/// Create a docker network and give a name.
+fn create_network(network_name: &str) {
+    let mut command = std::process::Command::new("docker");
+    command
+        .arg("network")
+        .arg("create")
+        .arg(network_name)
+        .output()
+        .unwrap_or_else(|e| panic!("Could not create docker network: {}, {}", network_name, e));
+}
+
+/// Check if the named docker network has previously been created.
+fn is_network_created(network_name: &str) -> bool {
+    let mut command = std::process::Command::new("docker");
+    command
+        .arg("network")
+        .arg("ls")
+        .arg("--no-trunc")
+        .arg("--filter")
+        .arg(format!("name={}", network_name));
+    let output = command
+        .output()
+        .unwrap_or_else(|_| panic!("Could not check if network name={} exists", network_name));
+    debug!(
+        "is_network_created name={} output: {:?}",
+        network_name, output
+    );
+    let all_output =
+        String::from_utf8(output.stdout).expect("Invalid output from docker network ls.");
+    all_output.contains(network_name)
+}
+
+/// Ensure the named docker network exists.
+fn ensure_network_exists(network_name: &str) {
+    if !is_network_created(network_name) {
+        create_network(network_name);
+    }
+}
+
 /// Bring things up. Returns any environment variables to pass to the run script.
 pub fn up(
     version: &SynapseVersion,
     script: &Option<Script>,
+    docker_network: &Option<String>,
     homeserver_config: &serde_yaml::Mapping,
 ) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
@@ -453,6 +506,9 @@ pub fn up(
             synapse_data_directory, err
         )
     });
+    if docker_network.is_some() {
+        ensure_network_exists(docker_network.as_ref().unwrap());
+    }
     debug!("generating synapse data");
     generate(&synapse_data_directory)?;
     debug!("done generating");
@@ -462,7 +518,7 @@ pub fn up(
         homeserver_config,
     );
     // FIXME: Allow configuration of recreating container if the image has been rebuilt.
-    up_image(&synapse_data_directory, false)?;
+    up_image(&synapse_data_directory, docker_network, false)?;
     // FIXME: If we have a token for an admin user, test it.
     // FIXME: Where should we store the token for the admin user? File storage? An embedded db?
     // FIXME: Note that we need to wait and retry, as bringing up Synapse can take a little time.

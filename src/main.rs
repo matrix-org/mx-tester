@@ -89,7 +89,7 @@ fn main() {
             }
             Command::Up => {
                 info!("mx-tester up...");
-                up(&synapse_version, &config.up, &config.homeserver_config).expect("Error in `up`");
+                up(&synapse_version, &config.up, &config.docker_network, &config.homeserver_config).expect("Error in `up`");
             }
             Command::Run => {
                 info!("mx-tester run...");
