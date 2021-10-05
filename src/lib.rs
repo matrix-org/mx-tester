@@ -76,10 +76,11 @@ pub struct Config {
     /// A script to run at the start of the teardown phase.
     pub down: Option<DownScript>,
 
+    #[serde(default)]
     /// A docker network to run the synape containers on.
     /// If the network does not exist it will be created.
     /// If a network is provided, the synapse container will be given the hostname `synapse`.
-    pub docker_network: Option<String>
+    pub docker_network: Option<String>,
 }
 
 /// The result of the test, as seen by `down()`.
@@ -342,25 +343,29 @@ fn generate(synapse_data_directory: &Path) -> Result<(), Error> {
 
 /// Ensures that a container is running for the synapse image.
 /// If a network is provided then the container will be given the hostname `synapse`.
-fn up_image(synapse_data_directory: &Path, network: &Option<String>, create_new_container: bool) -> Result<(), Error> {
+fn up_image(
+    synapse_data_directory: &Path,
+    network: &Option<String>,
+    create_new_container: bool,
+) -> Result<(), Error> {
     let container_name = "mx-tester_synapse";
-    let container_up = is_container_up(container_name);
+    let container_up = is_container_up(container_name)?;
     if container_up && create_new_container {
         container_stop(container_name)
     } else if container_up {
         return Ok(());
     }
-    if is_container_built(container_name) {
-        container_rm(container_name)
+    if is_container_built(container_name)? {
+        container_rm(container_name)?;
     }
     let mut command = std::process::Command::new("docker");
     command.arg("run");
     if network.is_some() {
         command
-        .arg("--network")
-        .arg(network.as_ref().unwrap())
-        .arg("--hostname")
-        .arg("synapse");
+            .arg("--network")
+            .arg(network.as_ref().unwrap())
+            .arg("--hostname")
+            .arg("synapse");
     }
     // Ensure that the config files and media can be deleted by the user
     // who launched the program by giving synapse the same uid/gid.
@@ -394,7 +399,7 @@ fn up_image(synapse_data_directory: &Path, network: &Option<String>, create_new_
 }
 
 /// Check whether the named container is currently up.
-fn is_container_up(container_name: &str) -> bool {
+fn is_container_up(container_name: &str) -> Result<bool, Error> {
     let mut command = std::process::Command::new("docker");
     command
         .arg("container")
@@ -402,20 +407,18 @@ fn is_container_up(container_name: &str) -> bool {
         .arg("--no-trunc")
         .arg("--filter")
         .arg(format!("name={}", container_name));
-    let output = command
-        .output()
-        .unwrap_or_else(|_| panic!("Could not check if container name={} is up", container_name));
+    let output = command.output()?;
     debug!(
         "is_container_up name={} output: {:?}",
         container_name, output
     );
     let all_output =
         String::from_utf8(output.stdout).expect("Invalid output from docker container ps.");
-    all_output.contains(container_name)
+    Ok(all_output.contains(container_name))
 }
 
 /// Check whether a container with this name has been built already.
-fn is_container_built(container_name: &str) -> bool {
+fn is_container_built(container_name: &str) -> Result<bool, Error> {
     let mut command = std::process::Command::new("docker");
     command
         .arg("container")
@@ -424,45 +427,40 @@ fn is_container_built(container_name: &str) -> bool {
         .arg("--no-trunc")
         .arg("--filter")
         .arg(format!("name={}", container_name));
-    let output = command.output().unwrap_or_else(|_| {
-        panic!(
-            "Could not check if container name={} exists",
-            container_name
-        )
-    });
+    let output = command.output()?;
     debug!(
         "is_container_built name={} output: {:?}",
         container_name, output
     );
     let all_output =
         String::from_utf8(output.stdout).expect("Invalid output from docker container ls.");
-    all_output.contains(container_name)
+    Ok(all_output.contains(container_name))
 }
 
 /// Remove the named container.
-fn container_rm(container_name: &str) {
+fn container_rm(container_name: &str) -> Result<(), Error> {
     let mut command = std::process::Command::new("docker");
     command
         .arg("container")
         .arg("rm")
         .arg(container_name)
-        .output()
-        .unwrap_or_else(|_| panic!("Could not remove container: {}", container_name));
+        .output()?;
+    Ok(())
 }
 
 /// Create a docker network and give a name.
-fn create_network(network_name: &str) {
+fn create_network(network_name: &str) -> Result<(), Error> {
     let mut command = std::process::Command::new("docker");
     command
         .arg("network")
         .arg("create")
         .arg(network_name)
-        .output()
-        .unwrap_or_else(|e| panic!("Could not create docker network: {}, {}", network_name, e));
+        .output()?;
+    Ok(())
 }
 
 /// Check if the named docker network has previously been created.
-fn is_network_created(network_name: &str) -> bool {
+fn is_network_created(network_name: &str) -> Result<bool, Error> {
     let mut command = std::process::Command::new("docker");
     command
         .arg("network")
@@ -470,23 +468,23 @@ fn is_network_created(network_name: &str) -> bool {
         .arg("--no-trunc")
         .arg("--filter")
         .arg(format!("name={}", network_name));
-    let output = command
-        .output()
-        .unwrap_or_else(|_| panic!("Could not check if network name={} exists", network_name));
+    let output = command.output()?;
     debug!(
         "is_network_created name={} output: {:?}",
         network_name, output
     );
     let all_output =
         String::from_utf8(output.stdout).expect("Invalid output from docker network ls.");
-    all_output.contains(network_name)
+    Ok(all_output.contains(network_name))
 }
 
 /// Ensure the named docker network exists.
-fn ensure_network_exists(network_name: &str) {
-    if !is_network_created(network_name) {
-        create_network(network_name);
+fn ensure_network_exists(network_name: &str) -> Result<bool, Error> {
+    let network_exists = is_network_created(network_name)?;
+    if !network_exists {
+        create_network(network_name)?;
     }
+    Ok(network_exists)
 }
 
 /// Bring things up. Returns any environment variables to pass to the run script.
@@ -507,7 +505,7 @@ pub fn up(
         )
     });
     if docker_network.is_some() {
-        ensure_network_exists(docker_network.as_ref().unwrap());
+        ensure_network_exists(docker_network.as_ref().unwrap())?;
     }
     debug!("generating synapse data");
     generate(&synapse_data_directory)?;

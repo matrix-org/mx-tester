@@ -10,6 +10,7 @@ fn test_default_config() {
     mx_tester::up(
         &SynapseVersion::ReleasedDockerImage,
         &config.up,
+        &config.docker_network,
         &config.homeserver_config,
     )
     .expect("Failed in step `up`");
