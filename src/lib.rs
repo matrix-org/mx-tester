@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod registration;
+
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -24,14 +26,10 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Error};
-use hmac::{Hmac, Mac, NewMac};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use sha1::Sha1;
-
-type HmacSha1 = Hmac<Sha1>;
 
 lazy_static! {
     /// Environment variable: the directory where a given module should be copied.
@@ -737,8 +735,8 @@ async fn load_or_create_admin_token(
     base_url: &str,
     registaration_shared_secret: String,
     admin_id: String,
-) -> RegistrationResponse {
-    register_user(
+) -> registration::RegistrationResponse {
+    registration::register_user(
         base_url,
         registaration_shared_secret,
         admin_id,
