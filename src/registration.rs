@@ -44,6 +44,9 @@ pub struct RegistrationResponse {
     pub access_token: String,
 }
 
+/// Register a user using the admin api and a registration shared secret.
+/// The base_url is the Scheme and Authority of the URL to access synapse via.
+/// Returns a RegistrationResponse if registration succeeded, otherwise returns an error. 
 pub async fn register_user(
     base_url: &str,
     registaration_shared_secret: String,
@@ -90,6 +93,6 @@ pub async fn register_user(
         .await?
         .json::<RegistrationResponse>()
         .await?;
-    debug!("Responded with {:#?}", response);
+    debug!("Registration responded with {:#?}", response);
     Ok(response)
 }
