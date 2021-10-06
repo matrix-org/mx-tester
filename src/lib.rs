@@ -51,6 +51,30 @@ lazy_static! {
     static ref PATCHED_IMAGE_DOCKER_TAG: OsString = OsString::from_str("mx-tester/synapse").unwrap();
 }
 
+/// We are going to need to extend this.
+/// OK, I am really frustrated, where this falls entirely short is that the hierarchy of properties the serialized representation
+/// isn't always a useful one, and it isn't one now when they're being used in a different context to the one the original schema was designed for.
+/// This is why later on parts of this are going to be ripped out and used in a ContainerConfig. That's ok,
+/// have fun trying to create some solution otherwise because it is a waste of time, and entirely stupid.  
+#[derive(Debug, Default, Deserialize)]
+pub struct DockerConfig {
+    #[serde(default)]
+    /// A docker network to run the synape containers on.
+    /// If the network does not exist it will be created.
+    /// If a network is provided, the synapse container will be given the hostname `synapse`.
+    pub docker_network: Option<String>,
+
+    /// The hostname to give the synapse container on the docker network, if the docker network has been provided.
+    #[serde(default = "DockerConfig::hostname_default")]
+    pub hostname: String
+}
+
+impl DockerConfig {
+    pub fn hostname_default() -> String {
+        "synapse".to_string()
+    }
+}
+
 /// The contents of a mx-tester.yaml
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
@@ -77,10 +101,8 @@ pub struct Config {
     pub down: Option<DownScript>,
 
     #[serde(default)]
-    /// A docker network to run the synape containers on.
-    /// If the network does not exist it will be created.
-    /// If a network is provided, the synapse container will be given the hostname `synapse`.
-    pub docker_network: Option<String>,
+    /// Where to configure the ports to expose for synapse, hostname and the network.
+    pub docker_config: Option<DockerConfig>
 }
 
 /// The result of the test, as seen by `down()`.
