@@ -55,6 +55,13 @@ fn main() {
         .unwrap_or_else(|err| panic!("Invalid config file `{}`: {}", config_path, err));
     debug!("Config: {:2?}", config);
 
+    // Extract container config from the docker config and the homeserver config.
+    let container_config = ContainerConfig {
+        docker_network: config.docker_config.docker_network,
+        port_mapping: config.docker_config.port_mapping,
+        hostname: config.docker_config.hostname,
+    };
+
     let commands = match matches.values_of("command") {
         None => vec![Command::Up, Command::Run, Command::Down],
         Some(values) => values
@@ -92,7 +99,7 @@ fn main() {
                 up(
                     &synapse_version,
                     &config.up,
-                    &config.docker_network,
+                    &container_config,
                     &config.homeserver_config,
                 )
                 .unwrap_or_else(|e| panic!("Error in `up`: {}", e));

@@ -5,12 +5,17 @@ use mx_tester::{self, *};
 #[test]
 fn test_default_config() {
     let config = Config::default();
+    let container_config = ContainerConfig {
+        docker_network: config.docker_config.docker_network,
+        port_mapping: config.docker_config.port_mapping,
+        hostname: config.docker_config.hostname,
+    };
     mx_tester::build(&config.modules, &SynapseVersion::ReleasedDockerImage)
         .expect("Failed in step `build`");
     mx_tester::up(
         &SynapseVersion::ReleasedDockerImage,
         &config.up,
-        &config.docker_network,
+        &container_config,
         &config.homeserver_config,
     )
     .expect("Failed in step `up`");

@@ -51,12 +51,7 @@ lazy_static! {
     static ref PATCHED_IMAGE_DOCKER_TAG: OsString = OsString::from_str("mx-tester/synapse").unwrap();
 }
 
-/// We are going to need to extend this.
-/// OK, I am really frustrated, where this falls entirely short is that the hierarchy of properties the serialized representation
-/// isn't always a useful one, and it isn't one now when they're being used in a different context to the one the original schema was designed for.
-/// This is why later on parts of this are going to be ripped out and used in a ContainerConfig. That's ok,
-/// have fun trying to create some solution otherwise because it is a waste of time, and entirely stupid.  
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct DockerConfig {
     #[serde(default)]
     /// A docker network to run the synape containers on.
@@ -66,12 +61,29 @@ pub struct DockerConfig {
 
     /// The hostname to give the synapse container on the docker network, if the docker network has been provided.
     #[serde(default = "DockerConfig::hostname_default")]
-    pub hostname: String
+    pub hostname: String,
+
+    #[serde(default = "DockerConfig::port_mapping_default")]
+    /// The docker port mapping configuration to use for the synapse container e.g. `9999:9999`.
+    pub port_mapping: String,
 }
 
 impl DockerConfig {
-    pub fn hostname_default() -> String {
+    fn hostname_default() -> String {
         "synapse".to_string()
+    }
+    fn port_mapping_default() -> String {
+        "9999:9999".to_string()
+    }
+}
+
+impl Default for DockerConfig {
+    fn default() -> DockerConfig {
+        DockerConfig {
+            docker_network: None,
+            hostname: DockerConfig::hostname_default(),
+            port_mapping: DockerConfig::port_mapping_default(),
+        }
     }
 }
 
@@ -102,7 +114,7 @@ pub struct Config {
 
     #[serde(default)]
     /// Where to configure the ports to expose for synapse, hostname and the network.
-    pub docker_config: Option<DockerConfig>
+    pub docker_config: DockerConfig,
 }
 
 /// The result of the test, as seen by `down()`.
@@ -128,6 +140,20 @@ impl SynapseVersion {
         let tag: &'static OsStr = PATCHED_IMAGE_DOCKER_TAG.as_ref();
         tag.into()
     }
+}
+
+/// The configuration for a single synapse container.
+/// We copy some fields from the main config because they
+/// are otherwise without the context we want to use them for, which
+/// is managing the docker container, not deserializing a homserver config.
+#[derive(Debug)]
+pub struct ContainerConfig {
+    /// The docker port configuration.
+    pub port_mapping: String,
+    /// The hostname of the synapse container.
+    pub hostname: String,
+    /// The name of a docker network to place the container in.
+    pub docker_network: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -367,7 +393,7 @@ fn generate(synapse_data_directory: &Path) -> Result<(), Error> {
 /// If a network is provided then the container will be given the hostname `synapse`.
 fn up_image(
     synapse_data_directory: &Path,
-    network: &Option<String>,
+    container_config: &ContainerConfig,
     create_new_container: bool,
 ) -> Result<(), Error> {
     let container_name = "mx-tester_synapse";
@@ -382,12 +408,12 @@ fn up_image(
     }
     let mut command = std::process::Command::new("docker");
     command.arg("run");
-    if network.is_some() {
+    if container_config.docker_network.is_some() {
         command
             .arg("--network")
-            .arg(network.as_ref().unwrap())
+            .arg(container_config.docker_network.as_ref().unwrap())
             .arg("--hostname")
-            .arg("synapse");
+            .arg(&container_config.hostname);
     }
     // Ensure that the config files and media can be deleted by the user
     // who launched the program by giving synapse the same uid/gid.
@@ -402,7 +428,7 @@ fn up_image(
         .arg("--name")
         .arg("mx-tester_synapse")
         .arg("-p")
-        .arg("9999:9999")
+        .arg(&container_config.port_mapping)
         .arg("-v")
         .arg(format!(
             "{}:{}",
@@ -513,7 +539,7 @@ fn ensure_network_exists(network_name: &str) -> Result<bool, Error> {
 pub fn up(
     version: &SynapseVersion,
     script: &Option<Script>,
-    docker_network: &Option<String>,
+    container_config: &ContainerConfig,
     homeserver_config: &serde_yaml::Mapping,
 ) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
@@ -526,8 +552,8 @@ pub fn up(
             synapse_data_directory, err
         )
     });
-    if docker_network.is_some() {
-        ensure_network_exists(docker_network.as_ref().unwrap())?;
+    if container_config.docker_network.is_some() {
+        ensure_network_exists(container_config.docker_network.as_ref().unwrap())?;
     }
     debug!("generating synapse data");
     generate(&synapse_data_directory)?;
@@ -538,7 +564,7 @@ pub fn up(
         homeserver_config,
     );
     // FIXME: Allow configuration of recreating container if the image has been rebuilt.
-    up_image(&synapse_data_directory, docker_network, false)?;
+    up_image(&synapse_data_directory, container_config, false)?;
     // FIXME: If we have a token for an admin user, test it.
     // FIXME: Where should we store the token for the admin user? File storage? An embedded db?
     // FIXME: Note that we need to wait and retry, as bringing up Synapse can take a little time.
