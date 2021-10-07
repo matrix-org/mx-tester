@@ -24,7 +24,7 @@ use std::{
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::{debug, warn};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 lazy_static! {
     /// Environment variable: the directory where a given module should be copied.
@@ -78,6 +78,28 @@ impl Default for DockerConfig {
         }
     }
 }
+#[derive(Debug, Deserialize, Serialize)]
+pub struct HomeserverConfig {
+    /// The name of the homserver
+    server_name: String,
+
+    /// The URL to communicate to the server with.
+    public_baseurl: String,
+
+    #[serde(flatten)]
+    /// Any extra fields in the homeserver config
+    extra_fields: HashMap<String, serde_yaml::Value>,
+}
+
+impl Default for HomeserverConfig {
+    fn default() -> HomeserverConfig {
+        HomeserverConfig {
+            server_name: "localhost:9999".to_string(),
+            public_baseurl: "http://localhost:9999".to_string(),
+            extra_fields: HashMap::new(),
+        }
+    }
+}
 
 /// The contents of a mx-tester.yaml
 #[derive(Debug, Default, Deserialize)]
@@ -89,8 +111,9 @@ pub struct Config {
     #[serde(default)]
     pub modules: Vec<ModuleConfig>,
 
+    #[serde(default)]
     /// Values to pass through into the homeserver.yaml for this synapse.
-    pub homeserver_config: serde_yaml::Mapping,
+    pub homeserver_config: HomeserverConfig,
 
     #[serde(default)]
     /// A script to run at the end of the setup phase.
@@ -153,25 +176,12 @@ pub struct ContainerConfig {
 impl ContainerConfig {
     pub fn from_mx_tester_config(config: &Config) -> Result<ContainerConfig, Error> {
         let homeserver_config = &config.homeserver_config;
-        let get_string = |property_name: &str| -> Result<String, Error> {
-            Ok(homeserver_config
-                .get(&serde_yaml::Value::from(property_name))
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::InvalidData,
-                        format!("Missing porperty {} in homeserver_config ", property_name),
-                    )
-                })?
-                .as_str()
-                .unwrap()
-                .to_string())
-        };
         Ok(ContainerConfig {
             docker_network: config.docker_config.docker_network.clone(),
             port_mapping: config.docker_config.port_mapping.clone(),
             hostname: config.docker_config.hostname.clone(),
-            public_url: get_string("public_baseurl")?,
-            server_name: get_string("server_name")?,
+            public_url: homeserver_config.public_baseurl.clone(),
+            server_name: homeserver_config.server_name.clone(),
         })
     }
 }
@@ -588,7 +598,7 @@ pub fn up(
     version: &SynapseVersion,
     script: &Option<Script>,
     container_config: &ContainerConfig,
-    homeserver_config: &serde_yaml::Mapping,
+    homeserver_config: &HomeserverConfig,
 ) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
     let SynapseVersion::ReleasedDockerImage = *version;
@@ -609,7 +619,7 @@ pub fn up(
     // Apply config from mx-tester.yml to the homeserver.yaml that was just made
     update_homeserver_config_with_config(
         &synapse_data_directory.join("homeserver.yaml"),
-        homeserver_config,
+        &homeserver_config,
     );
     // FIXME: Allow configuration of recreating container if the image has been rebuilt.
     up_image(&synapse_data_directory, container_config, false)?;
@@ -694,7 +704,7 @@ pub fn run(script: &Option<Script>) -> Result<(), Error> {
 /// with the properties in the provided serde_yaml::Mapping (which will usually be provided from mx-tester.yaml)
 fn update_homeserver_config_with_config(
     target_homeserver_config: &Path,
-    homeserver_config: &serde_yaml::Mapping,
+    homeserver_config: &HomeserverConfig,
 ) {
     let config_file = std::fs::File::open(target_homeserver_config).unwrap_or_else(|err| {
         panic!(
@@ -710,9 +720,13 @@ fn update_homeserver_config_with_config(
                 target_homeserver_config, err
             )
         });
-
-    for (key, value) in homeserver_config {
-        combined_config.insert(key.clone(), value.clone());
+    let mut insert_value = |key: &str, value: &str| {
+        combined_config.insert(serde_yaml::Value::from(key), serde_yaml::Value::from(value));
+    };
+    insert_value("public_baseurl", &homeserver_config.public_baseurl);
+    insert_value("server_name", &homeserver_config.server_name);
+    for (key, value) in &homeserver_config.extra_fields {
+        combined_config.insert(serde_yaml::Value::from(key.clone()), value.clone());
     }
     let mut config_writer = LineWriter::new(
         std::fs::File::create(&target_homeserver_config)
