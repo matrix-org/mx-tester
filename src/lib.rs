@@ -135,9 +135,7 @@ impl SynapseVersion {
 }
 
 /// The configuration for a single synapse container.
-/// We copy some fields from the main config because they
-/// are otherwise without the context we want to use them for, which
-/// is managing the docker container, not deserializing a homeserver config.
+/// We copy some fields from the main config for simplicity.
 #[derive(Debug)]
 pub struct ContainerConfig {
     /// The docker port configuration. e.g. `9999:9999`.
@@ -153,27 +151,28 @@ pub struct ContainerConfig {
 }
 
 impl ContainerConfig {
-    pub fn from_mx_tester_config(config: &Config) -> ContainerConfig {
+    pub fn from_mx_tester_config(config: &Config) -> Result<ContainerConfig, Error> {
         let homeserver_config = &config.homeserver_config;
-        ContainerConfig {
+        let get_string = |property_name: &str| -> Result<String, Error> {
+            Ok(homeserver_config
+                .get(&serde_yaml::Value::from(property_name))
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Missing porperty {} in homeserver_config ", property_name),
+                    )
+                })?
+                .as_str()
+                .unwrap()
+                .to_string())
+        };
+        Ok(ContainerConfig {
             docker_network: config.docker_config.docker_network.clone(),
             port_mapping: config.docker_config.port_mapping.clone(),
             hostname: config.docker_config.hostname.clone(),
-            public_url: homeserver_config
-                .get(&serde_yaml::Value::from("public_baseurl"))
-                .unwrap_or_else(|| {
-                    panic!("Could not get the public_baseurl from the homeserver_config")
-                })
-                .as_str()
-                .unwrap()
-                .to_string(),
-            server_name: homeserver_config
-                .get(&serde_yaml::Value::from("server_name"))
-                .unwrap_or_else(|| panic!("Could not get server_name from homeserver config"))
-                .as_str()
-                .unwrap()
-                .to_string(),
-        }
+            public_url: get_string("public_baseurl")?,
+            server_name: get_string("server_name")?,
+        })
     }
 }
 
@@ -436,10 +435,10 @@ fn up_image(
     }
     let mut command = std::process::Command::new("docker");
     command.arg("run");
-    if container_config.docker_network.is_some() {
+    if let Some(ref network) = container_config.docker_network {
         command
             .arg("--network")
-            .arg(container_config.docker_network.as_ref().unwrap())
+            .arg(network)
             .arg("--hostname")
             .arg(&container_config.hostname);
     }
@@ -488,8 +487,15 @@ fn is_container_up(container_name: &str) -> Result<bool, Error> {
         "is_container_up name={} output: {:?}",
         container_name, output
     );
-    let all_output =
-        String::from_utf8(output.stdout).expect("Invalid output from docker container ps.");
+    let all_output = String::from_utf8(output.stdout).map_err(|err| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "The output to stdout couldn't be decoded from utf8: {}",
+                err
+            ),
+        )
+    })?;
     Ok(all_output.contains(container_name))
 }
 
@@ -508,8 +514,15 @@ fn is_container_built(container_name: &str) -> Result<bool, Error> {
         "is_container_built name={} output: {:?}",
         container_name, output
     );
-    let all_output =
-        String::from_utf8(output.stdout).expect("Invalid output from docker container ls.");
+    let all_output = String::from_utf8(output.stdout).map_err(|err| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "The output to stdout couldn't be decoded from utf8: {}",
+                err
+            ),
+        )
+    })?;
     Ok(all_output.contains(container_name))
 }
 
@@ -549,8 +562,15 @@ fn is_network_created(network_name: &str) -> Result<bool, Error> {
         "is_network_created name={} output: {:?}",
         network_name, output
     );
-    let all_output =
-        String::from_utf8(output.stdout).expect("Invalid output from docker network ls.");
+    let all_output = String::from_utf8(output.stdout).map_err(|err| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "The output to stdout couldn't be decoded from utf8: {}",
+                err
+            ),
+        )
+    })?;
     Ok(all_output.contains(network_name))
 }
 
@@ -584,7 +604,7 @@ pub fn up(
         ensure_network_exists(container_config.docker_network.as_ref().unwrap())?;
     }
     debug!("generating synapse data");
-    generate(&synapse_data_directory, &container_config)?;
+    generate(&synapse_data_directory, container_config)?;
     debug!("done generating");
     // Apply config from mx-tester.yml to the homeserver.yaml that was just made
     update_homeserver_config_with_config(

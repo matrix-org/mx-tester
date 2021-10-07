@@ -56,7 +56,8 @@ fn main() {
     debug!("Config: {:2?}", config);
 
     // Extract container config from the docker config and the homeserver config.
-    let container_config = ContainerConfig::from_mx_tester_config(&config);
+    let container_config = ContainerConfig::from_mx_tester_config(&config)
+        .unwrap_or_else(|e| panic!("There is a property missing from the config {}", e));
 
     let commands = match matches.values_of("command") {
         None => vec![Command::Up, Command::Run, Command::Down],
