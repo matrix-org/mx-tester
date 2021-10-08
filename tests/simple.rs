@@ -1,3 +1,5 @@
+use std::convert::TryFrom;
+
 use mx_tester::{self, *};
 
 /// A trivial test that checks that steps build, up and down can be executed
@@ -5,7 +7,7 @@ use mx_tester::{self, *};
 #[test]
 fn test_default_config() {
     let config = Config::default();
-    let container_config = ContainerConfig::from_mx_tester_config(&config)
+    let container_config = ContainerConfig::try_from(&config)
         .expect("Should be able to convert the config without issue.");
     mx_tester::build(&config.modules, &SynapseVersion::ReleasedDockerImage)
         .expect("Failed in step `build`");

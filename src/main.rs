@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::convert::TryFrom;
+
 use log::*;
 use mx_tester::*;
 
@@ -56,7 +58,7 @@ fn main() {
     debug!("Config: {:2?}", config);
 
     // Extract container config from the docker config and the homeserver config.
-    let container_config = ContainerConfig::from_mx_tester_config(&config)
+    let container_config = ContainerConfig::try_from(&config)
         .unwrap_or_else(|e| panic!("There is a property missing from the config {}", e));
 
     let commands = match matches.values_of("command") {

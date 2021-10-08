@@ -15,6 +15,7 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
+    convert::TryFrom,
     ffi::{OsStr, OsString},
     io::{Error, ErrorKind, LineWriter, Write},
     path::{Path, PathBuf},
@@ -215,8 +216,9 @@ pub struct ContainerConfig {
     pub server_name: String,
 }
 
-impl ContainerConfig {
-    pub fn from_mx_tester_config(config: &Config) -> Result<ContainerConfig, Error> {
+impl TryFrom<&Config> for ContainerConfig {
+    type Error = std::io::Error;
+    fn try_from(config: &Config) -> Result<ContainerConfig, Error> {
         let homeserver_config = &config.homeserver_config;
         Ok(ContainerConfig {
             docker_network: config.docker_config.docker_network.clone(),
