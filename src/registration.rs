@@ -35,7 +35,7 @@ struct RegistrationPayload {
     mac: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RegistrationResponse {
     pub device_id: String,
     pub user_id: String,

@@ -31,6 +31,8 @@ use lazy_static::lazy_static;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 
+use crate::registration::RegistrationResponse;
+
 lazy_static! {
     /// Environment variable: the directory where a given module should be copied.
     ///
@@ -269,6 +271,7 @@ impl Script {
         Some(command)
     }
     pub fn run(&self, env: &HashMap<&'static OsStr, OsString>) -> Result<(), Error> {
+        debug!("Running with environment variables {:#?}", env);
         for line in &self.lines {
             let line = Script::substitute_env_vars(line, env);
             let mut command = match self.parse_command(&line) {
@@ -739,54 +742,49 @@ pub fn down(
 }
 
 /// Load an access token to the specified admin from storage or create the user.
-/// FIXME: Currently only createds the admin, it also needs to check if we have the specified user stored and store any new tokens.
 async fn load_or_create_admin_token(
     homeserver_config: &HomeserverConfig,
     admin_id: &str,
 ) -> Result<registration::RegistrationResponse, Error> {
-    Ok(registration::register_user(
-        &homeserver_config.public_baseurl,
-        homeserver_config
-            .registration_shared_secret
-            .as_ref()
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::InvalidData,
-                    "THe registration shared secret was not found in the homeserver_config",
-                )
-            })?,
-        admin_id,
-        "Irrelevant hopefully",
-        "admin",
-        true,
-    )
-    .await
-    .map_err(|err| {
-        Error::new(
-            ErrorKind::Other,
-            format!("Could not register user {}: {}", admin_id, err),
+    let session_file_path = synapse_root().join("data").join("mx-tester-session.json");
+    let session: RegistrationResponse = if session_file_path.exists() {
+        let config_file = std::fs::File::open(&session_file_path).with_context(|| {
+            format!(
+                "Could not open the mx-tester session file. {:?}",
+                session_file_path
+            )
+        })?;
+        serde_json::from_reader(config_file)
+            .context("The mx-tester-session could not be deserialized.")?
+    } else {
+        let session = registration::register_user(
+            &homeserver_config.public_baseurl,
+            homeserver_config
+                .registration_shared_secret
+                .as_ref()
+                .context("The registration shared secret was not found in the homeserver_config")?,
+            admin_id,
+            "Irrelevant hopefully",
+            "admin",
+            true,
         )
-    })?)
+        .await
+        .with_context(|| format!("Could not register user {}", admin_id))?;
+        let mut session_writer = LineWriter::new(std::fs::File::create(&session_file_path)?);
+        session_writer
+            .write_all(
+                &serde_json::to_vec(&session).context("Could not serialize mx-tester-session")?,
+            )
+            .context("Could not write mx-tester-session")?;
+        session
+    };
+    Ok(session)
 }
 
 /// Run the testing script.
 pub async fn run(config: &Config) -> Result<(), Error> {
     if let Some(ref code) = config.run {
         let mut env = shared_env_variables()?;
-<<<<<<< HEAD
-        // FIXME: Load the token, etc. from disk storage.
-        let user_details = load_or_create_admin_token(
-            "http://localhost:9999",
-            "REGISTRATION_SHARED_SECRET".to_string(),
-            "admin".to_string(),
-        )
-        .await;
-        env.insert(
-            &*MX_TEST_ADMIN,
-            OsStr::new(&user_details.access_token).into(),
-        );
-        code.run(&env).context("Error running `run` script")?;
-=======
         if let Some(ref admin_id) = config.admin_user {
             let user_details =
                 load_or_create_admin_token(&config.homeserver_config, admin_id).await?;
@@ -795,8 +793,7 @@ pub async fn run(config: &Config) -> Result<(), Error> {
                 OsStr::new(&user_details.access_token).into(),
             );
         }
-        code.run(&env)?;
->>>>>>> e28d093 (Integrate registration with new homeserver config wrapper)
+        code.run(&env).context("Error running `run` script?")?;
     }
     Ok(())
 }
