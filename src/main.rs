@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::convert::TryFrom;
+
 use log::*;
 use mx_tester::*;
 
@@ -55,6 +57,10 @@ fn main() {
         .unwrap_or_else(|err| panic!("Invalid config file `{}`: {}", config_path, err));
     debug!("Config: {:2?}", config);
 
+    // Extract container config from the docker config and the homeserver config.
+    let container_config = ContainerConfig::try_from(&config)
+        .unwrap_or_else(|e| panic!("There is a property missing from the config {}", e));
+
     let commands = match matches.values_of("command") {
         None => vec![Command::Up, Command::Run, Command::Down],
         Some(values) => values
@@ -89,7 +95,13 @@ fn main() {
             }
             Command::Up => {
                 info!("mx-tester up...");
-                up(&synapse_version, &config.up, &config.homeserver_config).expect("Error in `up`");
+                up(
+                    &synapse_version,
+                    &config.up,
+                    &container_config,
+                    &config.homeserver_config,
+                )
+                .unwrap_or_else(|e| panic!("Error in `up`: {}", e));
             }
             Command::Run => {
                 info!("mx-tester run...");
