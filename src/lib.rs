@@ -95,6 +95,9 @@ pub struct HomeserverConfig {
     /// The URL to communicate to the server with.
     public_baseurl: String,
 
+    /// The registration shared secret, if provided.
+    registration_shared_secret: Option<String>,
+
     #[serde(flatten)]
     /// Any extra fields in the homeserver config
     extra_fields: HashMap<String, serde_yaml::Value>,
@@ -105,6 +108,7 @@ impl Default for HomeserverConfig {
         HomeserverConfig {
             server_name: "localhost:9999".to_string(),
             public_baseurl: "http://localhost:9999".to_string(),
+            registration_shared_secret: None,
             extra_fields: HashMap::new(),
         }
     }
@@ -123,6 +127,9 @@ impl HomeserverConfig {
         };
         insert_value("public_baseurl", &self.public_baseurl);
         insert_value("server_name", &self.server_name);
+        if let Some(ref registration_shared_secret) = self.registration_shared_secret {
+            insert_value("registration_shared_secret", registration_shared_secret);
+        }
         for (key, value) in &self.extra_fields {
             combined_config.insert(serde_yaml::Value::from(key.clone()), value.clone());
         }
@@ -731,27 +738,42 @@ pub fn down(
     Ok(())
 }
 
+/// Load an access token to the specified admin from storage or create the user.
+/// FIXME: Currently only createds the admin, it also needs to check if we have the specified user stored and store any new tokens.
 async fn load_or_create_admin_token(
-    base_url: &str,
-    registaration_shared_secret: String,
-    admin_id: String,
-) -> registration::RegistrationResponse {
-    registration::register_user(
-        base_url,
-        registaration_shared_secret,
+    homeserver_config: &HomeserverConfig,
+    admin_id: &str,
+) -> Result<registration::RegistrationResponse, Error> {
+    Ok(registration::register_user(
+        &homeserver_config.public_baseurl,
+        homeserver_config
+            .registration_shared_secret
+            .as_ref()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "THe registration shared secret was not found in the homeserver_config",
+                )
+            })?,
         admin_id,
-        "Irrelevant hopefully".to_string(),
-        "admin".to_string(),
+        "Irrelevant hopefully",
+        "admin",
         true,
     )
     .await
-    .expect("Couldn't create a new admin user")
+    .map_err(|err| {
+        Error::new(
+            ErrorKind::Other,
+            format!("Could not register user {}: {}", admin_id, err),
+        )
+    })?)
 }
 
 /// Run the testing script.
-pub async fn run(script: &Option<Script>) -> Result<(), Error> {
-    if let Some(ref code) = script {
+pub async fn run(config: &Config) -> Result<(), Error> {
+    if let Some(ref code) = config.run {
         let mut env = shared_env_variables()?;
+<<<<<<< HEAD
         // FIXME: Load the token, etc. from disk storage.
         let user_details = load_or_create_admin_token(
             "http://localhost:9999",
@@ -764,6 +786,17 @@ pub async fn run(script: &Option<Script>) -> Result<(), Error> {
             OsStr::new(&user_details.access_token).into(),
         );
         code.run(&env).context("Error running `run` script")?;
+=======
+        if let Some(ref admin_id) = config.admin_user {
+            let user_details =
+                load_or_create_admin_token(&config.homeserver_config, admin_id).await?;
+            env.insert(
+                &*MX_TEST_ADMIN,
+                OsStr::new(&user_details.access_token).into(),
+            );
+        }
+        code.run(&env)?;
+>>>>>>> e28d093 (Integrate registration with new homeserver config wrapper)
     }
     Ok(())
 }

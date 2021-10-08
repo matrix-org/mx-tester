@@ -106,7 +106,7 @@ async fn main() {
             }
             Command::Run => {
                 info!("mx-tester run...");
-                result_run = Some(run(&config.run).await);
+                result_run = Some(run(&config).await);
             }
             Command::Down => {
                 info!("mx-tester down...");

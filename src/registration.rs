@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde::{Serialize, Deserialize};
-use sha1::Sha1;
 use data_encoding::HEXLOWER;
 use hmac::{Hmac, Mac, NewMac};
 use log::debug;
-
+use serde::{Deserialize, Serialize};
+use sha1::Sha1;
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -46,13 +45,13 @@ pub struct RegistrationResponse {
 
 /// Register a user using the admin api and a registration shared secret.
 /// The base_url is the Scheme and Authority of the URL to access synapse via.
-/// Returns a RegistrationResponse if registration succeeded, otherwise returns an error. 
+/// Returns a RegistrationResponse if registration succeeded, otherwise returns an error.
 pub async fn register_user(
     base_url: &str,
-    registaration_shared_secret: String,
-    username: String,
-    password: String,
-    displayname: String,
+    registaration_shared_secret: &str,
+    username: &str,
+    password: &str,
+    displayname: &str,
     is_admin: bool,
 ) -> Result<RegistrationResponse, reqwest::Error> {
     let registration_url = format!("{}/_synapse/admin/v1/register", base_url);
@@ -76,9 +75,9 @@ pub async fn register_user(
     );
     let registration_payload = RegistrationPayload {
         nonce,
-        username,
-        displayname,
-        password,
+        username: username.to_string(),
+        displayname: displayname.to_string(),
+        password: password.to_string(),
         admin: is_admin,
         mac: HEXLOWER.encode(&mac.finalize().into_bytes()),
     };
