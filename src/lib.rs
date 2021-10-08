@@ -422,10 +422,9 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
 
 /// Generate the data directory and default synapse configuration.
 fn generate(
-    synapse_root_directory: &Path,
+    synapse_data_directory: &Path,
     container_config: &ContainerConfig,
 ) -> Result<(), Error> {
-    let synapse_data_directory = synapse_root_directory.join("data");
     // FIXME: I think we're creating tonnes of unnamed garbage containers each time we run this.
     let mut command = std::process::Command::new("docker");
     command
