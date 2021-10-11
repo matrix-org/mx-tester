@@ -31,7 +31,7 @@ use lazy_static::lazy_static;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 
-use registration::RegistrationResponse;
+use registration::{ensure_user_exists, User};
 
 lazy_static! {
     /// Environment variable: the directory where a given module should be copied.
@@ -53,10 +53,6 @@ lazy_static! {
     ///
     /// Passed to `build`, `up`, `run`, `down` scripts.
     static ref MX_TEST_CWD: OsString = OsString::from_str("MX_TEST_CWD").unwrap();
-    /// Environment variable: An access token that can be used to login as an admin user.
-    ///
-    /// Passed to `run` scripts.
-    static ref MX_TEST_ADMIN: OsString = OsString::from_str("MX_TEST_ADMIN_TOKEN").unwrap();
 
     /// The docker tag used for the Synapse image we produce.
     static ref PATCHED_IMAGE_DOCKER_TAG: OsString = OsString::from_str("mx-tester/synapse").unwrap();
@@ -175,10 +171,10 @@ pub struct Config {
     #[serde(default)]
     /// Configuration for the docker network.
     pub docker_config: DockerConfig,
-    /// FIXME: not sure if this should just be a boolean
-    /// The mxid of an admin user to create, provided as an access token
-    /// to run.
-    admin_user: Option<String>,
+
+    #[serde(default)]
+    /// Any users to register and make available
+    pub users: Vec<User>,
 }
 
 /// The result of the test, as seen by `down()`.
@@ -662,10 +658,6 @@ pub fn up(
     // FIXME: Allow configuration of recreating container if the image has been rebuilt.
     up_image(&synapse_data_directory, container_config, false)
         .context("Error bringing up image")?;
-    // FIXME: If we have a token for an admin user, test it.
-    // FIXME: Where should we store the token for the admin user? File storage? An embedded db?
-    // FIXME: Note that we need to wait and retry, as bringing up Synapse can take a little time.
-    // FIXME: If we have no token or the token is invalid, create an admin user.
 
     if let Some(ref script) = script {
         let env = shared_env_variables()?;
@@ -741,59 +733,28 @@ pub fn down(
     Ok(())
 }
 
-/// Load an access token to the specified admin from storage or create the user.
-async fn load_or_create_admin_token(
-    homeserver_config: &HomeserverConfig,
-    admin_id: &str,
-) -> Result<registration::RegistrationResponse, Error> {
-    let session_file_path = synapse_root().join("data").join("mx-tester-session.json");
-    let session: RegistrationResponse = if session_file_path.exists() {
-        let config_file = std::fs::File::open(&session_file_path).with_context(|| {
-            format!(
-                "Could not open the mx-tester session file. {:?}",
-                session_file_path
-            )
-        })?;
-        serde_json::from_reader(config_file)
-            .context("The mx-tester-session could not be deserialized.")?
-    } else {
-        let session = registration::register_user(
-            &homeserver_config.public_baseurl,
-            homeserver_config
-                .registration_shared_secret
-                .as_ref()
-                .context("The registration shared secret was not found in the homeserver_config")?,
-            admin_id,
-            "Irrelevant hopefully",
-            "admin",
-            true,
-        )
-        .await
-        .with_context(|| format!("Could not register user {}", admin_id))?;
-        let mut session_writer = LineWriter::new(std::fs::File::create(&session_file_path)?);
-        session_writer
-            .write_all(
-                &serde_json::to_vec(&session).context("Could not serialize mx-tester-session")?,
-            )
-            .context("Could not write mx-tester-session")?;
-        session
-    };
-    Ok(session)
-}
-
 /// Run the testing script.
 pub async fn run(config: &Config) -> Result<(), Error> {
     if let Some(ref code) = config.run {
-        let mut env = shared_env_variables()?;
-        if let Some(ref admin_id) = config.admin_user {
-            let user_details =
-                load_or_create_admin_token(&config.homeserver_config, admin_id).await?;
-            env.insert(
-                &*MX_TEST_ADMIN,
-                OsStr::new(&user_details.access_token).into(),
-            );
+        if !config.users.is_empty() {
+            if let Some(ref registration_shared_secret) =
+                config.homeserver_config.registration_shared_secret
+            {
+                for user in &config.users {
+                    ensure_user_exists(
+                        &config.homeserver_config.public_baseurl,
+                        registration_shared_secret,
+                        user,
+                    )
+                    .await
+                    .unwrap_or_else(|err| {
+                        panic!("Could not setup user {}: {}", user.localname, err)
+                    });
+                }
+            }
         }
-        code.run(&env).context("Error running `run` script?")?;
+        let env = shared_env_variables()?;
+        code.run(&env).context("Error running `run` script")?;
     }
     Ok(())
 }
