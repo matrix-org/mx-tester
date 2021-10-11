@@ -31,7 +31,7 @@ use lazy_static::lazy_static;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 
-use crate::registration::RegistrationResponse;
+use registration::RegistrationResponse;
 
 lazy_static! {
     /// Environment variable: the directory where a given module should be copied.
@@ -56,7 +56,7 @@ lazy_static! {
     /// Environment variable: An access token that can be used to login as an admin user.
     ///
     /// Passed to `run` scripts.
-    static ref MX_TEST_ADMIN: OsString = OsString::from_str("MX_TEST_ADMIN").unwrap();
+    static ref MX_TEST_ADMIN: OsString = OsString::from_str("MX_TEST_ADMIN_TOKEN").unwrap();
 
     /// The docker tag used for the Synapse image we produce.
     static ref PATCHED_IMAGE_DOCKER_TAG: OsString = OsString::from_str("mx-tester/synapse").unwrap();

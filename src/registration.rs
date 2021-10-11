@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use anyhow::{anyhow, Error};
 use data_encoding::HEXLOWER;
 use hmac::{Hmac, Mac, NewMac};
 use log::debug;
@@ -19,11 +20,6 @@ use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 
 type HmacSha1 = Hmac<Sha1>;
-
-#[derive(Debug, Deserialize)]
-struct GetRegisterResponse {
-    nonce: String,
-}
 
 #[derive(Debug, Serialize)]
 struct RegistrationPayload {
@@ -48,28 +44,36 @@ pub struct RegistrationResponse {
 /// Returns a RegistrationResponse if registration succeeded, otherwise returns an error.
 pub async fn register_user(
     base_url: &str,
-    registaration_shared_secret: &str,
+    registration_shared_secret: &str,
     username: &str,
     password: &str,
     displayname: &str,
     is_admin: bool,
-) -> Result<RegistrationResponse, reqwest::Error> {
+) -> Result<RegistrationResponse, Error> {
+    #[derive(Debug, Deserialize)]
+    struct GetRegisterResponse {
+        nonce: String,
+    }
     let registration_url = format!("{}/_synapse/admin/v1/register", base_url);
-    let client = reqwest::Client::new();
     let nonce = reqwest::get(&registration_url)
         .await?
         .json::<GetRegisterResponse>()
         .await?
         .nonce;
-    let mut mac = HmacSha1::new_from_slice(registaration_shared_secret.as_bytes())
-        .expect("Couldn't use the provided registration shared secret to createa a hmac");
+    let mut mac =
+        HmacSha1::new_from_slice(registration_shared_secret.as_bytes()).map_err(|err| {
+            anyhow!(
+                "Couldn't use the provided registration shared secret to create a hmac: {}",
+                err
+            )
+        })?;
     mac.update(
         format!(
             "{nonce}\0{username}\0{password}\0{admin}",
             nonce = nonce,
             username = username,
             password = password,
-            admin = if is_admin { "admin" } else { "nodadmin" }
+            admin = if is_admin { "admin" } else { "notadmin" }
         )
         .as_bytes(),
     );
@@ -85,6 +89,7 @@ pub async fn register_user(
         "Sending payload {:#?}",
         serde_json::to_string_pretty(&registration_payload)
     );
+    let client = reqwest::Client::new();
     let response = client
         .post(&registration_url)
         .json(&registration_payload)
