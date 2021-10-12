@@ -93,8 +93,9 @@ pub struct HomeserverConfig {
     /// The URL to communicate to the server with.
     public_baseurl: String,
 
+    #[serde(default = "HomeserverConfig::registration_default")]
     /// The registration shared secret, if provided.
-    registration_shared_secret: Option<String>,
+    registration_shared_secret: String,
 
     #[serde(flatten)]
     /// Any extra fields in the homeserver config
@@ -106,7 +107,7 @@ impl Default for HomeserverConfig {
         HomeserverConfig {
             server_name: "localhost:9999".to_string(),
             public_baseurl: "http://localhost:9999".to_string(),
-            registration_shared_secret: None,
+            registration_shared_secret: HomeserverConfig::registration_default(),
             extra_fields: HashMap::new(),
         }
     }
@@ -125,9 +126,10 @@ impl HomeserverConfig {
         };
         insert_value("public_baseurl", &self.public_baseurl);
         insert_value("server_name", &self.server_name);
-        if let Some(ref registration_shared_secret) = self.registration_shared_secret {
-            insert_value("registration_shared_secret", registration_shared_secret);
-        }
+        insert_value(
+            "registration_shared_secret",
+            &self.registration_shared_secret,
+        );
         for (key, value) in &self.extra_fields {
             combined_config.insert(serde_yaml::Value::from(key.clone()), value.clone());
         }
@@ -139,6 +141,9 @@ impl HomeserverConfig {
             )
             .context("Could not write combined homeserver config")?;
         Ok(())
+    }
+    pub fn registration_default() -> String {
+        "MX_TESTER_REGISTRATION_DEFAULT".to_string()
     }
 }
 
@@ -737,20 +742,14 @@ pub fn down(
 pub async fn run(config: &Config) -> Result<(), Error> {
     if let Some(ref code) = config.run {
         if !config.users.is_empty() {
-            if let Some(ref registration_shared_secret) =
-                config.homeserver_config.registration_shared_secret
-            {
-                for user in &config.users {
-                    ensure_user_exists(
-                        &config.homeserver_config.public_baseurl,
-                        registration_shared_secret,
-                        user,
-                    )
-                    .await
-                    .unwrap_or_else(|err| {
-                        panic!("Could not setup user {}: {}", user.localname, err)
-                    });
-                }
+            for user in &config.users {
+                ensure_user_exists(
+                    &config.homeserver_config.public_baseurl,
+                    &config.homeserver_config.registration_shared_secret,
+                    user,
+                )
+                .await
+                .unwrap_or_else(|err| panic!("Could not setup user {}: {}", user.localname, err));
             }
         }
         let env = shared_env_variables()?;
