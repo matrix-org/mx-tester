@@ -22,15 +22,6 @@ use sha1::Sha1;
 
 type HmacSha1 = Hmac<Sha1>;
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct RegistrationResponse {
-    pub device_id: String,
-    pub user_id: String,
-    #[serde(rename(deserialize = "home_server"))]
-    pub homeserver: String,
-    pub access_token: String,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct User {
     /// Create user as admin?
@@ -62,7 +53,7 @@ pub async fn register_user(
     base_url: &str,
     registration_shared_secret: &str,
     user: &User,
-) -> Result<RegistrationResponse, Error> {
+) -> Result<(), Error> {
     #[derive(Debug, Deserialize)]
     struct GetRegisterResponse {
         nonce: String,
@@ -131,10 +122,7 @@ pub async fn register_user(
         .send()
         .await?;
     match response.status() {
-        StatusCode::OK => {
-            let registration_info = response.json::<RegistrationResponse>().await?;
-            Ok(registration_info)
-        }
+        StatusCode::OK => Ok(()),
         _ => {
             let body = response.json::<ErrorResponse>().await?;
             Err(anyhow!(
@@ -146,7 +134,7 @@ pub async fn register_user(
     }
 }
 
-pub async fn login(base_url: &str, user: &User) -> Result<RegistrationResponse, Error> {
+pub async fn login(base_url: &str, user: &User) -> Result<(), Error> {
     #[derive(Debug, Serialize)]
     struct Identifier {
         #[serde(rename(serialize = "type"))]
@@ -169,15 +157,12 @@ pub async fn login(base_url: &str, user: &User) -> Result<RegistrationResponse, 
         },
     };
     let login_url = format!("{base_url}/_matrix/client/r0/login", base_url = base_url);
-    let client = reqwest::Client::new();
-    let response = client
+    reqwest::Client::new()
         .post(login_url)
         .json(&login_payload)
         .send()
-        .await?
-        .json::<RegistrationResponse>()
         .await?;
-    Ok(response)
+    Ok(())
 }
 
 /// Try to login with the user details provided. If login fails, try to register that user.
@@ -186,7 +171,7 @@ pub async fn ensure_user_exists(
     base_url: &str,
     registration_shared_secret: &str,
     user: &User,
-) -> Result<RegistrationResponse, Error> {
+) -> Result<(), Error> {
     match login(base_url, user).await {
         Ok(response) => Ok(response),
         Err(_) => {
