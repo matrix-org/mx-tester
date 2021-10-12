@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod registration;
+
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -28,6 +30,8 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
+
+use registration::{ensure_user_exists, User};
 
 lazy_static! {
     /// Environment variable: the directory where a given module should be copied.
@@ -89,6 +93,10 @@ pub struct HomeserverConfig {
     /// The URL to communicate to the server with.
     public_baseurl: String,
 
+    #[serde(default = "HomeserverConfig::registration_shared_secret_default")]
+    /// The registration shared secret, if provided.
+    registration_shared_secret: String,
+
     #[serde(flatten)]
     /// Any extra fields in the homeserver config
     extra_fields: HashMap<String, serde_yaml::Value>,
@@ -99,6 +107,7 @@ impl Default for HomeserverConfig {
         HomeserverConfig {
             server_name: "localhost:9999".to_string(),
             public_baseurl: "http://localhost:9999".to_string(),
+            registration_shared_secret: HomeserverConfig::registration_shared_secret_default(),
             extra_fields: HashMap::new(),
         }
     }
@@ -117,6 +126,10 @@ impl HomeserverConfig {
         };
         insert_value("public_baseurl", &self.public_baseurl);
         insert_value("server_name", &self.server_name);
+        insert_value(
+            "registration_shared_secret",
+            &self.registration_shared_secret,
+        );
         for (key, value) in &self.extra_fields {
             combined_config.insert(serde_yaml::Value::from(key.clone()), value.clone());
         }
@@ -128,6 +141,9 @@ impl HomeserverConfig {
             )
             .context("Could not write combined homeserver config")?;
         Ok(())
+    }
+    pub fn registration_shared_secret_default() -> String {
+        "MX_TESTER_REGISTRATION_DEFAULT".to_string()
     }
 }
 
@@ -160,6 +176,10 @@ pub struct Config {
     #[serde(default)]
     /// Configuration for the docker network.
     pub docker_config: DockerConfig,
+
+    #[serde(default)]
+    /// Any users to register and make available
+    pub users: Vec<User>,
 }
 
 /// The result of the test, as seen by `down()`.
@@ -252,6 +272,7 @@ impl Script {
         Some(command)
     }
     pub fn run(&self, env: &HashMap<&'static OsStr, OsString>) -> Result<(), Error> {
+        debug!("Running with environment variables {:#?}", env);
         for line in &self.lines {
             let line = Script::substitute_env_vars(line, env);
             let mut command = match self.parse_command(&line) {
@@ -616,9 +637,9 @@ fn ensure_network_exists(network_name: &str) -> Result<bool, Error> {
 }
 
 /// Bring things up. Returns any environment variables to pass to the run script.
-pub fn up(
+pub async fn up(
     version: &SynapseVersion,
-    script: &Option<Script>,
+    config: &Config,
     container_config: &ContainerConfig,
     homeserver_config: &HomeserverConfig,
 ) -> Result<(), Error> {
@@ -642,12 +663,17 @@ pub fn up(
     // FIXME: Allow configuration of recreating container if the image has been rebuilt.
     up_image(&synapse_data_directory, container_config, false)
         .context("Error bringing up image")?;
-    // FIXME: If we have a token for an admin user, test it.
-    // FIXME: Where should we store the token for the admin user? File storage? An embedded db?
-    // FIXME: Note that we need to wait and retry, as bringing up Synapse can take a little time.
-    // FIXME: If we have no token or the token is invalid, create an admin user.
 
-    if let Some(ref script) = script {
+    for user in &config.users {
+        ensure_user_exists(
+            &config.homeserver_config.public_baseurl,
+            &config.homeserver_config.registration_shared_secret,
+            user,
+        )
+        .await
+        .with_context(|| anyhow!("Could not setup user {}", user.localname))?;
+    }
+    if let Some(ref script) = config.up {
         let env = shared_env_variables()?;
         script.run(&env).context("Error running `up` script")?;
     }
@@ -722,10 +748,9 @@ pub fn down(
 }
 
 /// Run the testing script.
-pub fn run(script: &Option<Script>) -> Result<(), Error> {
-    if let Some(ref code) = script {
+pub fn run(config: &Config) -> Result<(), Error> {
+    if let Some(ref code) = config.run {
         let env = shared_env_variables()?;
-        // FIXME: Load the token, etc. from disk storage.
         code.run(&env).context("Error running `run` script")?;
     }
     Ok(())
