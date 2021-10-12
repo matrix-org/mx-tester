@@ -22,28 +22,13 @@ use sha1::Sha1;
 
 type HmacSha1 = Hmac<Sha1>;
 
-#[derive(Debug, Serialize)]
-struct RegistrationPayload {
-    nonce: String,
-    username: String,
-    displayname: String,
-    password: String,
-    admin: bool,
-    mac: String,
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RegistrationResponse {
     pub device_id: String,
     pub user_id: String,
-    pub home_server: String,
+    #[serde(rename(deserialize = "home_server"))]
+    pub homeserver: String,
     pub access_token: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ErrorResponse {
-    errcode: String,
-    error: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,16 +39,18 @@ pub struct User {
 
     pub localname: String,
 
-    // if the password isn't provided, use the localname
+    /// You should use the password method to access this slot
+    /// so that iff the password isn't provided, it will use the localname.
     #[serde(default)]
     password: Option<String>,
 }
 
 impl User {
-    pub fn password(&self) -> String {
+    /// Get the password if it has been provided, or use the localname in its place.
+    pub fn password(&self) -> &str {
         match &self.password {
-            Some(password) => password.clone(),
-            None => self.localname.clone(),
+            Some(password) => password,
+            None => &self.localname,
         }
     }
 }
@@ -90,6 +77,7 @@ pub async fn register_user(
         .json::<GetRegisterResponse>()
         .await?
         .nonce;
+    // We use map_err here because Hmac::InvalidKeyLength doesn't implement the std::error::Error trait.
     let mut mac =
         HmacSha1::new_from_slice(registration_shared_secret.as_bytes()).map_err(|err| {
             anyhow!(
@@ -107,11 +95,22 @@ pub async fn register_user(
         )
         .as_bytes(),
     );
+
+    #[derive(Debug, Serialize)]
+    struct RegistrationPayload {
+        nonce: String,
+        username: String,
+        displayname: String,
+        password: String,
+        admin: bool,
+        mac: String,
+    }
+
     let registration_payload = RegistrationPayload {
         nonce,
         username: user.localname.to_string(),
         displayname: user.localname.to_string(),
-        password: user.password(),
+        password: user.password().to_string(),
         admin: user.admin,
         mac: HEXLOWER.encode(&mac.finalize().into_bytes()),
     };
@@ -119,6 +118,12 @@ pub async fn register_user(
         "Sending payload {:#?}",
         serde_json::to_string_pretty(&registration_payload)
     );
+
+    #[derive(Debug, Deserialize)]
+    struct ErrorResponse {
+        errcode: String,
+        error: String,
+    }
     let client = reqwest::Client::new();
     let response = client
         .post(&registration_url)
@@ -157,7 +162,7 @@ pub async fn login(base_url: &str, user: &User) -> Result<RegistrationResponse, 
     }
     let login_payload = LoginPayload {
         login_type: "m.login.password".to_string(),
-        password: user.password(),
+        password: user.password().to_string(),
         identifier: Identifier {
             identifier_type: "m.id.user".to_string(),
             user: user.localname.to_string(),
@@ -175,7 +180,7 @@ pub async fn login(base_url: &str, user: &User) -> Result<RegistrationResponse, 
     Ok(response)
 }
 
-/// Try to logion with the user details provided. If login fails, try to register that user.
+/// Try to login with the user details provided. If login fails, try to register that user.
 /// If registration then fails, returns an error explaining why, otherwise returns the login details.
 pub async fn ensure_user_exists(
     base_url: &str,
