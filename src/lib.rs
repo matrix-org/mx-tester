@@ -637,9 +637,9 @@ fn ensure_network_exists(network_name: &str) -> Result<bool, Error> {
 }
 
 /// Bring things up. Returns any environment variables to pass to the run script.
-pub fn up(
+pub async fn up(
     version: &SynapseVersion,
-    script: &Option<Script>,
+    config: &Config,
     container_config: &ContainerConfig,
     homeserver_config: &HomeserverConfig,
 ) -> Result<(), Error> {
@@ -664,7 +664,16 @@ pub fn up(
     up_image(&synapse_data_directory, container_config, false)
         .context("Error bringing up image")?;
 
-    if let Some(ref script) = script {
+    for user in &config.users {
+        ensure_user_exists(
+            &config.homeserver_config.public_baseurl,
+            &config.homeserver_config.registration_shared_secret,
+            user,
+        )
+        .await
+        .with_context(|| anyhow!("Could not setup user {}", user.localname))?;
+    }
+    if let Some(ref script) = config.up {
         let env = shared_env_variables()?;
         script.run(&env).context("Error running `up` script")?;
     }
@@ -739,17 +748,8 @@ pub fn down(
 }
 
 /// Run the testing script.
-pub async fn run(config: &Config) -> Result<(), Error> {
+pub fn run(config: &Config) -> Result<(), Error> {
     if let Some(ref code) = config.run {
-        for user in &config.users {
-            ensure_user_exists(
-                &config.homeserver_config.public_baseurl,
-                &config.homeserver_config.registration_shared_secret,
-                user,
-            )
-            .await
-            .unwrap_or_else(|err| panic!("Could not setup user {}: {}", user.localname, err));
-        }
         let env = shared_env_variables()?;
         code.run(&env).context("Error running `run` script")?;
     }

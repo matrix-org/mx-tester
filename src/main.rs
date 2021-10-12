@@ -98,15 +98,16 @@ async fn main() {
                 info!("mx-tester up...");
                 up(
                     &synapse_version,
-                    &config.up,
+                    &config,
                     &container_config,
                     &config.homeserver_config,
                 )
+                .await
                 .unwrap_or_else(|e| panic!("Error in `up`: {}", e));
             }
             Command::Run => {
                 info!("mx-tester run...");
-                result_run = Some(run(&config).await);
+                result_run = Some(run(&config));
             }
             Command::Down => {
                 info!("mx-tester down...");
