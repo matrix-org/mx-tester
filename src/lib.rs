@@ -88,18 +88,18 @@ impl Default for DockerConfig {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HomeserverConfig {
     /// The name of the homeserver.
-    server_name: String,
+    pub server_name: String,
 
     /// The URL to communicate to the server with.
-    public_baseurl: String,
+    pub public_baseurl: String,
 
     #[serde(default = "HomeserverConfig::registration_shared_secret_default")]
     /// The registration shared secret, if provided.
-    registration_shared_secret: String,
+    pub registration_shared_secret: String,
 
     #[serde(flatten)]
     /// Any extra fields in the homeserver config
-    extra_fields: HashMap<String, serde_yaml::Value>,
+    pub extra_fields: HashMap<String, serde_yaml::Value>,
 }
 
 impl Default for HomeserverConfig {

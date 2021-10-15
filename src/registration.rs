@@ -13,35 +13,79 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Error};
+use async_trait::async_trait;
 use data_encoding::HEXLOWER;
 use hmac::{Hmac, Mac, NewMac};
 use log::debug;
+use rand::Rng;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
+use typed_builder::TypedBuilder;
 
 type HmacSha1 = Hmac<Sha1>;
 
-#[derive(Debug, Deserialize)]
+const ATTEMPTS: u64 = 10;
+const INTERVAL: std::ops::Range<u64> = 300..1000;
+
+#[derive(Clone, TypedBuilder, Debug, Default, Deserialize)]
 pub struct User {
     /// Create user as admin?
     #[serde(default)]
+    #[builder(default = false)]
     pub admin: bool,
 
     pub localname: String,
 
-    /// You should use the password method to access this slot
-    /// so that iff the password isn't provided, it will use the localname.
-    #[serde(default)]
-    password: Option<String>,
+    /// The password for this user. If unspecified, we use `"password"` as password.
+    #[serde(default = "User::default_password")]
+    #[builder(default = User::default_password())]
+    pub password: String,
 }
 
 impl User {
-    /// Get the password if it has been provided, or use the localname in its place.
-    pub fn password(&self) -> &str {
-        match &self.password {
-            Some(password) => password,
-            None => &self.localname,
+    fn default_password() -> String {
+        "password".to_string()
+    }
+}
+
+#[async_trait]
+trait Retry {
+    async fn auto_retry(&self, attempts: u64) -> Result<reqwest::Response, Error>;
+}
+
+#[async_trait]
+impl Retry for reqwest::RequestBuilder {
+    async fn auto_retry(&self, max_attempts: u64) -> Result<reqwest::Response, Error> {
+        let mut attempt = 1;
+        loop {
+            match self
+                .try_clone()
+                .expect("Cannot auto-retry non-clonable requests")
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    debug!("auto_retry success");
+                    break Ok(response);
+                }
+                Err(err) => {
+                    debug!("auto_retry error {:?} => {:?}", err, err.status());
+                    // FIXME: Is this the right way to decide when to retry?
+                    let should_retry = attempt < max_attempts
+                        && (err.is_connect() || err.is_timeout() || err.is_request());
+
+                    if should_retry {
+                        let duration = (attempt * attempt) * rand::thread_rng().gen_range(INTERVAL);
+                        attempt += 1;
+                        debug!("auto_retry: sleeping {}ms", duration);
+                        tokio::time::sleep(std::time::Duration::from_millis(duration)).await;
+                    } else {
+                        debug!("auto_retry: giving up!");
+                        return Err(err.into());
+                    }
+                }
+            }
         }
     }
 }
@@ -63,7 +107,10 @@ pub async fn register_user(
         "Registration shared secret: {}, url: {}, user: {:#?}",
         registration_shared_secret, registration_url, user
     );
-    let nonce = reqwest::get(&registration_url)
+    let client = reqwest::Client::new();
+    let nonce = client
+        .get(&registration_url)
+        .auto_retry(ATTEMPTS)
         .await?
         .json::<GetRegisterResponse>()
         .await?
@@ -81,7 +128,7 @@ pub async fn register_user(
             "{nonce}\0{username}\0{password}\0{admin}",
             nonce = nonce,
             username = user.localname,
-            password = user.password(),
+            password = user.password,
             admin = if user.admin { "admin" } else { "notadmin" }
         )
         .as_bytes(),
@@ -101,7 +148,7 @@ pub async fn register_user(
         nonce,
         username: user.localname.to_string(),
         displayname: user.localname.to_string(),
-        password: user.password().to_string(),
+        password: user.password.to_string(),
         admin: user.admin,
         mac: HEXLOWER.encode(&mac.finalize().into_bytes()),
     };
@@ -119,7 +166,7 @@ pub async fn register_user(
     let response = client
         .post(&registration_url)
         .json(&registration_payload)
-        .send()
+        .auto_retry(ATTEMPTS)
         .await?;
     match response.status() {
         StatusCode::OK => Ok(()),
@@ -150,19 +197,23 @@ pub async fn login(base_url: &str, user: &User) -> Result<(), Error> {
     }
     let login_payload = LoginPayload {
         login_type: "m.login.password".to_string(),
-        password: user.password().to_string(),
+        password: user.password.to_string(),
         identifier: Identifier {
             identifier_type: "m.id.user".to_string(),
             user: user.localname.to_string(),
         },
     };
     let login_url = format!("{base_url}/_matrix/client/r0/login", base_url = base_url);
-    reqwest::Client::new()
-        .post(login_url)
+    let response = reqwest::Client::new()
+        .post(&login_url)
         .json(&login_payload)
-        .send()
+        .auto_retry(ATTEMPTS)
         .await?;
-    Ok(())
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(anyhow!("Login error: {:?}", response.text().await))
+    }
 }
 
 /// Try to login with the user details provided. If login fails, try to register that user.
@@ -172,10 +223,11 @@ pub async fn ensure_user_exists(
     registration_shared_secret: &str,
     user: &User,
 ) -> Result<(), Error> {
+    debug!("ensure_user_exists {}", base_url);
     match login(base_url, user).await {
         Ok(response) => Ok(response),
-        Err(_) => {
-            debug!("Registering user {}", user.localname);
+        Err(err) => {
+            debug!("Registering user {} {}", user.localname, err);
             Ok(register_user(base_url, registration_shared_secret, user).await?)
         }
     }
