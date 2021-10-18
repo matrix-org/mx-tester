@@ -52,6 +52,10 @@ typed-builder = "0.9"
 nix = "0.23"
 
 [dev-dependencies]
+# Generate random user ids
 uuid = { version = "0.8", features = ["v4"] }
+
+# Test APIs
 matrix-sdk = "0.4"
+synapse-admin-api = {version = "0.1", features = ["client"] }
 

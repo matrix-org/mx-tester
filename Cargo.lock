@@ -1129,7 +1129,7 @@ dependencies = [
  "matrix-sdk-common",
  "mime",
  "reqwest",
- "ruma",
+ "ruma 0.4.0",
  "serde",
  "serde_json",
  "thiserror",
@@ -1155,7 +1155,7 @@ dependencies = [
  "matrix-sdk-crypto",
  "pbkdf2",
  "rand 0.8.4",
- "ruma",
+ "ruma 0.4.0",
  "serde",
  "serde_json",
  "sha2",
@@ -1176,7 +1176,7 @@ dependencies = [
  "futures",
  "futures-locks",
  "instant",
- "ruma",
+ "ruma 0.4.0",
  "serde",
  "tokio",
  "uuid",
@@ -1202,7 +1202,7 @@ dependencies = [
  "matrix-sdk-common",
  "olm-rs",
  "pbkdf2",
- "ruma",
+ "ruma 0.4.0",
  "serde",
  "serde_json",
  "sha2",
@@ -1298,6 +1298,7 @@ dependencies = [
  "serde_yaml",
  "sha-1",
  "shellexpand",
+ "synapse-admin-api",
  "tokio",
  "typed-builder",
  "uuid",
@@ -1864,6 +1865,21 @@ dependencies = [
 
 [[package]]
 name = "ruma"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efd3b567d0ca13e963145e1700d4182fa371ce08b090245b1dd62c703b4579b4"
+dependencies = [
+ "assign",
+ "js_int",
+ "ruma-api",
+ "ruma-common",
+ "ruma-events",
+ "ruma-identifiers",
+ "ruma-serde",
+]
+
+[[package]]
+name = "ruma"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "668031e3108d6a2cfbe6eca271d8698f4593440e71a44afdadcf67ce3cb93c1f"
@@ -2424,6 +2440,16 @@ dependencies = [
  "proc-macro2 1.0.29",
  "quote 1.0.9",
  "unicode-xid 0.2.2",
+]
+
+[[package]]
+name = "synapse-admin-api"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5a9a17ed98393220cd37ad66423a3a56eed89d52719b626c2764b2c3e14e797"
+dependencies = [
+ "ruma 0.3.0",
+ "serde",
 ]
 
 [[package]]
