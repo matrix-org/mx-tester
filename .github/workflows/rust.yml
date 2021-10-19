@@ -11,14 +11,18 @@ env:
 
 jobs:
   build:
-
+    name: Build and test
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v2
     - name: Build
       run: cargo build --verbose
     - name: Run tests
-      run: RUST_LOG=debug cargo test --verbose
-    - name: Run linters
+      run: RUST_LOG=debug cargo test -- --nocapture
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Style linters
       run: cargo fmt -- --check

@@ -1,9 +1,35 @@
+use std::ops::Not;
+
+use lazy_static::lazy_static;
 use mx_tester::{self, registration::User, *};
-use std::{convert::TryFrom, ops::Not};
+
+lazy_static! {
+    static ref DOCKER: bollard::Docker =
+        bollard::Docker::connect_with_local_defaults().expect("Failed to connect to Docker daemon");
+}
+
+/// Simple test: empty config.
+#[tokio::test]
+async fn test_simple() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let docker = DOCKER.clone();
+    let config = Config::builder().name("test-simple".into()).build();
+    mx_tester::build(&docker, &config)
+        .await
+        .expect("Failed in step `build`");
+    mx_tester::up(&docker, &SynapseVersion::ReleasedDockerImage, &config)
+        .await
+        .expect("Failed in step `up`");
+    mx_tester::down(&docker, &config, Status::Manual)
+        .await
+        .expect("Failed in step `down`");
+}
 
 #[tokio::test]
 async fn test_create_users() {
-    let _ = env_logger::builder().is_test(true).try_init().unwrap();
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let docker = DOCKER.clone();
 
     // Setup with two users.
     let admin = User::builder()
@@ -19,29 +45,38 @@ async fn test_create_users() {
         .password(format!("{}", uuid::Uuid::new_v4()))
         .build();
 
-    let config = Config {
-        users: vec![
+    // Use port 9998 to avoid colliding with test_simple.
+    let config = Config::builder()
+        .name("test-create-users".into())
+        .users(vec![
             admin.clone(),
             regular_user.clone(),
             regular_user_with_custom_password.clone(),
-        ],
-        ..Config::default()
-    };
-    let container_config = ContainerConfig::try_from(&config)
-        .expect("Should be able to convert the config without issue.");
-    mx_tester::build(&config.modules, &SynapseVersion::ReleasedDockerImage)
+        ])
+        .homeserver(
+            HomeserverConfig::builder()
+                .server_name("localhost:9998".to_string())
+                .public_baseurl("http://localhost:9998".to_string())
+                .build(),
+        )
+        .docker(
+            DockerConfig::builder()
+                .port_mapping(vec![PortMapping {
+                    host: 9998,
+                    guest: 8008,
+                }])
+                .build(),
+        )
+        .build();
+    mx_tester::build(&docker, &config)
+        .await
         .expect("Failed in step `build`");
-    mx_tester::up(
-        &SynapseVersion::ReleasedDockerImage,
-        &config,
-        &container_config,
-        &config.homeserver_config,
-    )
-    .await
-    .expect("Failed in step `up`");
+    mx_tester::up(&docker, &SynapseVersion::ReleasedDockerImage, &config)
+        .await
+        .expect("Failed in step `up`");
 
     // Now attempt to login as our users.
-    let homeserver_url = reqwest::Url::parse(&config.homeserver_config.public_baseurl).unwrap();
+    let homeserver_url = reqwest::Url::parse(&config.homeserver.public_baseurl).unwrap();
 
     let regular_user_client = matrix_sdk::Client::new(homeserver_url.clone()).unwrap();
     regular_user_client
@@ -123,10 +158,7 @@ async fn test_create_users() {
             .expect_err("A non-admin user should not be able to send an admin API request");
     }
 
-    mx_tester::down(
-        &SynapseVersion::ReleasedDockerImage,
-        &config.down,
-        Status::Manual,
-    )
-    .expect("Failed in step `down`");
+    mx_tester::down(&docker, &config, Status::Manual)
+        .await
+        .expect("Failed in step `down`");
 }

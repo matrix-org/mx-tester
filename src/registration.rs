@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{anyhow, Error};
+use anyhow::{anyhow, Context, Error};
 use async_trait::async_trait;
 use data_encoding::HEXLOWER;
 use hmac::{Hmac, Mac, NewMac};
 use log::debug;
+use matrix_sdk::ClientConfig;
 use rand::Rng;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -25,8 +26,8 @@ use typed_builder::TypedBuilder;
 
 type HmacSha1 = Hmac<Sha1>;
 
-const ATTEMPTS: u64 = 10;
-const INTERVAL: std::ops::Range<u64> = 300..1000;
+/// The maximal number of attempts when registering a user..
+const RETRY_ATTEMPTS: u64 = 10;
 
 #[derive(Clone, TypedBuilder, Debug, Default, Deserialize)]
 pub struct User {
@@ -57,6 +58,10 @@ trait Retry {
 #[async_trait]
 impl Retry for reqwest::RequestBuilder {
     async fn auto_retry(&self, max_attempts: u64) -> Result<reqwest::Response, Error> {
+        /// The duration of the retry will be picked randomly within this interval,
+        /// plus an exponential backoff.
+        const BASE_INTERVAL_MS: std::ops::Range<u64> = 300..1000;
+
         let mut attempt = 1;
         loop {
             match self
@@ -76,7 +81,8 @@ impl Retry for reqwest::RequestBuilder {
                         && (err.is_connect() || err.is_timeout() || err.is_request());
 
                     if should_retry {
-                        let duration = (attempt * attempt) * rand::thread_rng().gen_range(INTERVAL);
+                        let duration =
+                            (attempt * attempt) * rand::thread_rng().gen_range(BASE_INTERVAL_MS);
                         attempt += 1;
                         debug!("auto_retry: sleeping {}ms", duration);
                         tokio::time::sleep(std::time::Duration::from_millis(duration)).await;
@@ -110,7 +116,7 @@ pub async fn register_user(
     let client = reqwest::Client::new();
     let nonce = client
         .get(&registration_url)
-        .auto_retry(ATTEMPTS)
+        .auto_retry(RETRY_ATTEMPTS)
         .await?
         .json::<GetRegisterResponse>()
         .await?
@@ -166,7 +172,7 @@ pub async fn register_user(
     let response = client
         .post(&registration_url)
         .json(&registration_payload)
-        .auto_retry(ATTEMPTS)
+        .auto_retry(RETRY_ATTEMPTS)
         .await?;
     match response.status() {
         StatusCode::OK => Ok(()),
@@ -181,41 +187,6 @@ pub async fn register_user(
     }
 }
 
-pub async fn login(base_url: &str, user: &User) -> Result<(), Error> {
-    #[derive(Debug, Serialize)]
-    struct Identifier {
-        #[serde(rename(serialize = "type"))]
-        identifier_type: String,
-        user: String,
-    }
-    #[derive(Debug, Serialize)]
-    struct LoginPayload {
-        #[serde(rename(serialize = "type"))]
-        login_type: String,
-        identifier: Identifier,
-        password: String,
-    }
-    let login_payload = LoginPayload {
-        login_type: "m.login.password".to_string(),
-        password: user.password.to_string(),
-        identifier: Identifier {
-            identifier_type: "m.id.user".to_string(),
-            user: user.localname.to_string(),
-        },
-    };
-    let login_url = format!("{base_url}/_matrix/client/r0/login", base_url = base_url);
-    let response = reqwest::Client::new()
-        .post(&login_url)
-        .json(&login_payload)
-        .auto_retry(ATTEMPTS)
-        .await?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(anyhow!("Login error: {:?}", response.text().await))
-    }
-}
-
 /// Try to login with the user details provided. If login fails, try to register that user.
 /// If registration then fails, returns an error explaining why, otherwise returns the login details.
 pub async fn ensure_user_exists(
@@ -223,12 +194,28 @@ pub async fn ensure_user_exists(
     registration_shared_secret: &str,
     user: &User,
 ) -> Result<(), Error> {
-    debug!("ensure_user_exists {}", base_url);
-    match login(base_url, user).await {
-        Ok(response) => Ok(response),
-        Err(err) => {
-            debug!("Registering user {} {}", user.localname, err);
-            Ok(register_user(base_url, registration_shared_secret, user).await?)
+    debug!(
+        "ensure_user_exists at {}: user {} with password {}",
+        base_url, user.localname, user.password
+    );
+    use matrix_sdk::ruma::api::client::error::*;
+    use matrix_sdk::ruma::api::error::*;
+    let homeserver_url = reqwest::Url::parse(base_url)?;
+    let config = ClientConfig::new();
+    config.get_request_config().retry_limit(RETRY_ATTEMPTS);
+    let client = matrix_sdk::Client::new_with_config(homeserver_url, config)?;
+    match client
+        .login(&user.localname, &user.password, None, None)
+        .await
+    {
+        Err(matrix_sdk::Error::Http(matrix_sdk::HttpError::ClientApi(
+            FromHttpResponseError::Http(ServerError::Known(err)),
+        ))) if err.kind == ErrorKind::Forbidden => {
+            debug!("Could not authenticate {}", err);
+            // Proceed with registration.
         }
+        Ok(_) => return Ok(()),
+        Err(err) => return Err(err).context("Error attempting to login"),
     }
+    Ok(register_user(base_url, registration_shared_secret, user).await?)
 }
