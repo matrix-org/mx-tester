@@ -71,9 +71,13 @@ async fn test_create_users() {
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
-    mx_tester::up(&docker, &SynapseVersion::ReleasedDockerImage, &config)
-        .await
-        .expect("Failed in step `up`");
+    tokio::time::timeout(std::time::Duration::from_secs(180), async {
+        mx_tester::up(&docker, &SynapseVersion::ReleasedDockerImage, &config)
+            .await
+            .expect("Failed in step `up`")
+    })
+    .await
+    .expect("Timeout in step `up`");
 
     // Now attempt to login as our users.
     let homeserver_url = reqwest::Url::parse(&config.homeserver.public_baseurl).unwrap();

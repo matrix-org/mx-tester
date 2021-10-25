@@ -84,16 +84,8 @@ pub struct PortMapping {
 /// Docker-specific configuration to use in the test.
 #[derive(Debug, Deserialize, TypedBuilder)]
 pub struct DockerConfig {
-    #[serde(default)]
-    #[builder(default)]
-    /// A docker network to run the synape containers on.
-    /// If the network does not exist it will be created.
-    /// If a network is provided, the synapse container will be given the hostname `synapse`.
-    /// Defaults to None.
-    pub docker_network: Option<String>,
-
     /// The hostname to give the synapse container on the docker network, if the docker network has been provided.
-    /// Defaults to `synapse` but will not be used unless a network is provided in docker_network.
+    /// Defaults to `synapse` but will not be used unless a network is provided in network.
     #[serde(default = "DockerConfig::default_hostname")]
     #[builder(default = DockerConfig::default_hostname())]
     pub hostname: String,
@@ -107,7 +99,6 @@ pub struct DockerConfig {
 impl Default for DockerConfig {
     fn default() -> DockerConfig {
         DockerConfig {
-            docker_network: None,
             hostname: Self::default_hostname(),
             port_mapping: Self::default_port_mapping(),
         }
@@ -331,6 +322,10 @@ impl Config {
         match self.synapse {
             SynapseVersion::ReleasedDockerImage => format!("mx-tester-synapse-{}", self.name),
         }
+    }
+
+    pub fn network(&self) -> String {
+        self.tag()
     }
 
     /// The name for the container we're using to setup Synapse.
@@ -601,19 +596,17 @@ async fn start_synapse_container(
         }
     }
 
-    if let Some(ref network_name) = config.docker.docker_network {
-        // ... add the container to the network.
-        docker
-            .connect_network(
-                network_name,
-                ConnectNetworkOptions {
-                    container: container_name,
-                    endpoint_config: EndpointSettings::default(),
-                },
-            )
-            .await
-            .context("Failed to connect container")?;
-    }
+    // ... add the container to the network.
+    docker
+        .connect_network(
+            config.network().as_ref(),
+            ConnectNetworkOptions {
+                container: container_name,
+                endpoint_config: EndpointSettings::default(),
+            },
+        )
+        .await
+        .context("Failed to connect container")?;
 
     let is_container_running = docker.is_container_running(container_name).await?;
     if !is_container_running {
@@ -832,15 +825,14 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
 
     // Create the network if necessary.
     // We'll add the container once it's available.
-    if let Some(ref network_name) = config.docker.docker_network {
-        if !docker.is_network_up(network_name.as_ref()).await? {
-            docker
-                .create_network(CreateNetworkOptions {
-                    name: network_name.as_str(),
-                    ..CreateNetworkOptions::default()
-                })
-                .await?;
-        }
+    let network_name = config.network();
+    if !docker.is_network_up(&network_name).await? {
+        docker
+            .create_network(CreateNetworkOptions {
+                name: network_name.as_str(),
+                ..CreateNetworkOptions::default()
+            })
+            .await?;
     }
 
     // Create the synapse data directory.
