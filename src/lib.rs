@@ -440,7 +440,15 @@ pub struct ModuleConfig {
     /// specified by environment variable `MX_TEST_MODULE_DIR`.
     build: Script,
 
-    /// A Yaml config to copy into homeserver.yaml
+    /// A Yaml config to copy into homeserver.yaml.
+    /// See https://matrix-org.github.io/synapse/latest/modules/index.html
+    ///
+    /// This typically looks like
+    /// ```yaml
+    /// module: python_module_name
+    /// config:
+    ///   key: value
+    /// ```
     config: serde_yaml::Value,
 }
 
@@ -480,7 +488,17 @@ async fn start_synapse_container(
             format!("SYNAPSE_SERVER_NAME={}", config.homeserver.server_name),
             "SYNAPSE_REPORT_STATS=no".into(),
             "SYNAPSE_CONFIG_DIR=/data".into(),
-            "SYNAPSE_HTTP_PORT=8008".into(), // FIXME: Perhaps this should be a port specified somewhere?
+            format!(
+                "SYNAPSE_HTTP_PORT={}",
+                config
+                    .docker
+                    .port_mapping
+                    .get(0)
+                    .ok_or_else(|| anyhow!(
+                        "In mx-tester.yml, an empty port mapping was specified"
+                    ))?
+                    .guest
+            ),
         ];
         // Ensure that the config files and media can be deleted by the user
         // who launched the program by giving synapse the same uid/gid.
