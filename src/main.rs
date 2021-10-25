@@ -69,6 +69,7 @@ async fn main() {
             .collect(),
     };
     debug!("Running {:?}", commands);
+    debug!("Root: {:?}", config.test_root());
 
     // Now run the scripts.
     // We stop immediately if `build` or `up` fails but if `run` fails,
@@ -100,7 +101,7 @@ async fn main() {
                 info!("mx-tester up...");
                 up(&docker, &synapse_version, &config)
                     .await
-                    .unwrap_or_else(|e| panic!("Error in `up`: {}", e));
+                    .expect("Error in `up`");
             }
             Command::Run => {
                 info!("mx-tester run...");

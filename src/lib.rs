@@ -791,6 +791,13 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
         );
         while let Some(result) = stream.next().await {
             let info = result.context("Daemon `docker build` indicated an error")?;
+            if let Some(ref error) = info.error {
+                return Err(anyhow!(
+                    "Error while building an image {}: {:?}",
+                    error,
+                    info.error_detail
+                ));
+            }
             debug!("Build image progress {:?}", info);
         }
     }
