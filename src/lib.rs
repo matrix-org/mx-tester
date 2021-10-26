@@ -840,6 +840,8 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
     let synapse_data_directory = config.synapse_root().join("data");
     std::fs::create_dir_all(&synapse_data_directory)
         .with_context(|| format!("Cannot create directory {:?}", synapse_data_directory))?;
+    // Cleanup leftovers.
+    let _ = std::fs::remove_file(synapse_data_directory.join("homeserver.yaml"));
 
     // Start a container to generate homeserver.yaml.
     start_synapse_container(
