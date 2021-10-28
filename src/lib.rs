@@ -44,7 +44,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::codec::{BytesCodec, FramedRead};
 use typed_builder::TypedBuilder;
 
-use registration::{ensure_user_exists, User};
+use registration::{handle_user_registration, User};
 
 lazy_static! {
     /// Environment variable: the directory where a given module should be copied.
@@ -869,15 +869,9 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
     .context("Failed to start Synapse")?;
 
     debug!("Synapse is now launched");
-    for user in &config.users {
-        ensure_user_exists(
-            &config.homeserver.public_baseurl,
-            &config.homeserver.registration_shared_secret,
-            user,
-        )
+    handle_user_registration(&config)
         .await
-        .with_context(|| format!("Could not setup user {}", user.localname))?;
-    }
+        .context("Failed to setup users")?;
     if let Some(ref script) = config.up {
         let env = config.shared_env_variables()?;
         script.run(&env).context("Error running `up` script")?;
