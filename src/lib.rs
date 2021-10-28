@@ -377,47 +377,19 @@ pub struct Script {
     lines: Vec<String>,
 }
 impl Script {
-    /// Substitute anything that looks like the use of environment variable such as $A or ${B} using the entries to the hash map provided.
-    /// If there is no matching table entry for $FOO then it will remain as $FOO in the script line.
-    fn substitute_env_vars<'a>(
-        line: &'a str,
-        env: &HashMap<&'static OsStr, OsString>,
-    ) -> Cow<'a, str> {
-        shellexpand::env_with_context_no_errors(line, |str| match env.get(OsStr::new(str)) {
-            Some(value) => value.to_str(),
-            _ => None,
-        })
-    }
-    /// Parse a line of script into a std::process::Command and its arguments.
-    /// Returns None when there is no command token in the line (e.g. just whitespace).
-    fn parse_command(&self, line: &str) -> Option<std::process::Command> {
-        let tokens = comma::parse_command(line)?;
-        let mut token_stream = tokens.iter();
-        let mut command = std::process::Command::new(OsString::from(token_stream.next()?));
-        for token in token_stream {
-            command.arg(token);
-        }
-        Some(command)
-    }
     pub fn run(&self, env: &HashMap<&'static OsStr, OsString>) -> Result<(), Error> {
         debug!("Running with environment variables {:#?}", env);
         for line in &self.lines {
-            let line = Script::substitute_env_vars(line, env);
-            let mut command = match self.parse_command(&line) {
-                Some(command) => command,
-                None => {
-                    warn!("Skipping empty line in script {:?}", self.lines);
-                    continue;
-                }
-            };
-            let status = command.envs(env).spawn()?.wait()?;
-            if !status.success() {
-                return Err(anyhow!(
-                    "Error running command `{line}`: {status}",
-                    line = line,
-                    status = status
-                ));
+            let mut exec = ezexec::ExecBuilder::with_shell(line).map_err(|err| {
+                anyhow!("Could not interpret `{}` as shell script: {}", line, err)
+            })?;
+            for (key, val) in env {
+                exec.set_env(key, val);
             }
+            exec.spawn_transparent()
+                .map_err(|err| anyhow!("Error executing `{}`: {}", line, err))?
+                .wait()
+                .map_err(|err| anyhow!("Error during `{}`: {}", line, err))?;
         }
         Ok(())
     }
@@ -664,11 +636,11 @@ async fn start_synapse_container(
             },
         )
         .await
-        .context("Error while preparing to generate homeserver.yaml")?;
+        .context("Error while preparing to Synapse container")?;
     let execution = docker
-        .start_exec(&exec.id, Some(StartExecOptions { detach: false }))
+        .start_exec(&exec.id, Some(StartExecOptions { detach }))
         .await
-        .context("Error while generating homeserver.yaml")?;
+        .context("Error starting Synapse container")?;
 
     if !detach {
         let mut log_file = tokio::fs::OpenOptions::new()
@@ -677,7 +649,7 @@ async fn start_synapse_container(
             .open(data_dir.join(format!("mx-tester-{}.out.log", container_name)))
             .await?;
         tokio::task::spawn(async move {
-            debug!(target: "synapse", "Launching homeserver generation");
+            debug!(target: "synapse", "Launching Synapse container");
             match execution {
                 bollard::exec::StartExecResults::Attached {
                     mut output,
@@ -691,7 +663,7 @@ async fn start_synapse_container(
                 }
                 bollard::exec::StartExecResults::Detached => panic!(),
             }
-            debug!(target: "synapse", "Homeserver generation finished");
+            debug!(target: "synapse", "Synapse container finished");
             Ok::<(), Error>(())
         })
         .await??;
@@ -889,7 +861,7 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
             user,
         )
         .await
-        .with_context(|| anyhow!("Could not setup user {}", user.localname))?;
+        .with_context(|| format!("Could not setup user {}", user.localname))?;
     }
     if let Some(ref script) = config.up {
         let env = config.shared_env_variables()?;
@@ -938,11 +910,19 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
         // Report any error from `on_failure` or `on_success`.
         result?
     }
-    debug!("Taking down synapse.");
-    docker
-        .stop_container(&run_container_name, None)
-        .await
-        .context("Error stopping container")?;
+    debug!(target: "mx-tester-down", "Taking down synapse.");
+    match docker.stop_container(&run_container_name, None).await {
+        Err(bollard::errors::Error::DockerResponseNotModifiedError { .. }) => {
+            // Synapse is already down.
+            debug!(target: "mx-tester-down", "Synapse was already down");
+        }
+        Ok(_) => {
+            debug!(target: "mx-tester-down", "Synapse taken down");
+        }
+        Err(err) => {
+            return Err(err).context("Error stopping container");
+        }
+    }
     Ok(())
 }
 
