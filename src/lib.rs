@@ -405,7 +405,15 @@ pub struct ModuleConfig {
 
     /// A script to build and copy the module in the directory
     /// specified by environment variable `MX_TEST_MODULE_DIR`.
+    ///
+    /// This script will be executed in the **host**.
     build: Script,
+
+    /// A script to install dependencies.
+    ///
+    /// This script will be executed in the **guest**.
+    #[serde(default)]
+    install: Option<Script>,
 
     /// A Yaml config to copy into homeserver.yaml.
     /// See https://matrix-org.github.io/synapse/latest/modules/index.html
@@ -722,6 +730,7 @@ RUN pip show matrix-synapse
 # Copy and install custom modules.
 RUN mkdir /mx-tester
 {copy}
+{setup}
 
 VOLUME [\"/data\"]
 ENTRYPOINT []
@@ -731,6 +740,12 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
     copy = config.modules.iter()
         // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
         .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
+        .format("\n"),
+    setup = config.modules.iter()
+        .filter_map(|module| match module.install {
+            None => None,
+            Some(ref script) => Some(format!("## Install {}\n{}\n", module.name, script.lines.iter().map(|line| format!("RUN {}", line)).format("\n")))
+        })
         .format("\n")
 );
     debug!("dockerfile {}", dockerfile_content);
@@ -915,6 +930,10 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
         Err(bollard::errors::Error::DockerResponseNotModifiedError { .. }) => {
             // Synapse is already down.
             debug!(target: "mx-tester-down", "Synapse was already down");
+        }
+        Err(bollard::errors::Error::DockerResponseNotFoundError { .. }) => {
+            // Synapse is already down.
+            debug!(target: "mx-tester-down", "No Synapse container");
         }
         Ok(_) => {
             debug!(target: "mx-tester-down", "Synapse taken down");
