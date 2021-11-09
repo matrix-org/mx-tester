@@ -283,7 +283,7 @@ impl Config {
         if !combined_config.contains_key(&modules_key)
             || combined_config.get(&modules_key).unwrap().is_null()
         {
-            combined_config.insert(modules_key.clone(), YAML::Sequence(vec![].into()));
+            combined_config.insert(modules_key.clone(), YAML::Sequence(vec![]));
         }
         let modules_root = combined_config
             .get_mut(&modules_key)
@@ -742,10 +742,7 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
         .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
         .format("\n"),
     setup = config.modules.iter()
-        .filter_map(|module| match module.install {
-            None => None,
-            Some(ref script) => Some(format!("## Install {}\n{}\n", module.name, script.lines.iter().map(|line| format!("RUN {}", line)).format("\n")))
-        })
+        .filter_map(|module| module.install.as_ref().map(|script| format!("## Install {}\n{}\n", module.name, script.lines.iter().map(|line| format!("RUN {}", line)).format("\n"))))
         .format("\n")
 );
     debug!("dockerfile {}", dockerfile_content);
@@ -869,7 +866,7 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
     .context("Failed to start Synapse")?;
 
     debug!("Synapse is now launched");
-    handle_user_registration(&config)
+    handle_user_registration(config)
         .await
         .context("Failed to setup users")?;
     if let Some(ref script) = config.up {
