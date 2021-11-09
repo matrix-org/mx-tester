@@ -17,7 +17,6 @@ pub mod registration;
 use std::{
     borrow::Cow,
     collections::HashMap,
-    convert::TryFrom,
     ffi::{OsStr, OsString},
     io::{LineWriter, Write},
     ops::Not,
@@ -26,12 +25,26 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Error};
+use bollard::{
+    container::{
+        Config as BollardContainerConfig, CreateContainerOptions, ListContainersOptions,
+        LogsOptions, StartContainerOptions, WaitContainerOptions,
+    },
+    exec::{CreateExecOptions, StartExecOptions},
+    models::{EndpointSettings, HostConfig, HostConfigLogConfig, PortBinding},
+    network::{ConnectNetworkOptions, CreateNetworkOptions, ListNetworksOptions},
+    Docker,
+};
+use futures_util::stream::StreamExt;
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
+use tokio_util::codec::{BytesCodec, FramedRead};
+use typed_builder::TypedBuilder;
 
-use registration::{ensure_user_exists, User};
+use registration::{handle_user_registration, User};
 
 lazy_static! {
     /// Environment variable: the directory where a given module should be copied.
@@ -53,87 +66,234 @@ lazy_static! {
     ///
     /// Passed to `build`, `up`, `run`, `down` scripts.
     static ref MX_TEST_CWD: OsString = OsString::from_str("MX_TEST_CWD").unwrap();
-
-    /// The docker tag used for the Synapse image we produce.
-    static ref PATCHED_IMAGE_DOCKER_TAG: OsString = OsString::from_str("mx-tester/synapse").unwrap();
 }
 
-#[derive(Debug, Deserialize)]
-pub struct DockerConfig {
-    #[serde(default)]
-    /// A docker network to run the synape containers on.
-    /// If the network does not exist it will be created.
-    /// If a network is provided, the synapse container will be given the hostname `synapse`.
-    /// Defaults to None.
-    pub docker_network: Option<String>,
+/// The amount of memory to allocate
+const MEMORY_ALLOCATION_BYTES: i64 = 4 * 1024 * 1024 * 1024;
 
+/// A port in the container made accessible on the host machine.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PortMapping {
+    /// The port, as visible on the host machine.
+    pub host: u64,
+
+    /// The port, as visible on the guest, i.e. in the container.
+    pub guest: u64,
+}
+
+/// Docker-specific configuration to use in the test.
+#[derive(Debug, Deserialize, TypedBuilder)]
+pub struct DockerConfig {
     /// The hostname to give the synapse container on the docker network, if the docker network has been provided.
-    /// Defaults to `synapse` but will not be used unless a network is provided in docker_network.
+    /// Defaults to `synapse` but will not be used unless a network is provided in network.
+    #[serde(default = "DockerConfig::default_hostname")]
+    #[builder(default = DockerConfig::default_hostname())]
     pub hostname: String,
 
-    /// The docker port mapping configuration to use for the synapse container e.g. `9999:9999`.
-    /// Defaults to 9999:9999
-    pub port_mapping: String,
+    /// The docker port mapping configuration to use for the synapse container.
+    #[serde(default = "DockerConfig::default_port_mapping")]
+    #[builder(default = DockerConfig::default_port_mapping())]
+    pub port_mapping: Vec<PortMapping>,
 }
 
 impl Default for DockerConfig {
     fn default() -> DockerConfig {
         DockerConfig {
-            docker_network: None,
-            hostname: "synapse".to_string(),
-            port_mapping: "9999:9999".to_string(),
+            hostname: Self::default_hostname(),
+            port_mapping: Self::default_port_mapping(),
         }
     }
 }
-#[derive(Debug, Deserialize, Serialize)]
+
+impl DockerConfig {
+    fn default_hostname() -> String {
+        "synapse".to_string()
+    }
+    fn default_port_mapping() -> Vec<PortMapping> {
+        vec![PortMapping {
+            host: 9999,
+            guest: 8008,
+        }]
+    }
+}
+
+/// Configuration for the homeserver.
+///
+/// This will be applied to homeserver.yaml.
+#[derive(Debug, Deserialize, Serialize, TypedBuilder)]
 pub struct HomeserverConfig {
     /// The name of the homeserver.
-    server_name: String,
+    #[builder(default = "localhost:9999".to_string())]
+    pub server_name: String,
 
     /// The URL to communicate to the server with.
-    public_baseurl: String,
+    #[builder(default = "http://localhost:9999".to_string())]
+    pub public_baseurl: String,
 
     #[serde(default = "HomeserverConfig::registration_shared_secret_default")]
+    #[builder(default = HomeserverConfig::registration_shared_secret_default())]
     /// The registration shared secret, if provided.
-    registration_shared_secret: String,
+    pub registration_shared_secret: String,
 
     #[serde(flatten)]
+    #[builder(default)]
     /// Any extra fields in the homeserver config
-    extra_fields: HashMap<String, serde_yaml::Value>,
+    pub extra_fields: HashMap<String, serde_yaml::Value>,
 }
 
 impl Default for HomeserverConfig {
     fn default() -> HomeserverConfig {
-        HomeserverConfig {
-            server_name: "localhost:9999".to_string(),
-            public_baseurl: "http://localhost:9999".to_string(),
-            registration_shared_secret: HomeserverConfig::registration_shared_secret_default(),
-            extra_fields: HashMap::new(),
-        }
+        Self::builder().build()
     }
 }
 
 impl HomeserverConfig {
-    /// Update the homeserver.yaml at the given path (usually one that has been generated by synapse)
+    pub fn registration_shared_secret_default() -> String {
+        "MX_TESTER_REGISTRATION_DEFAULT".to_string()
+    }
+}
+
+/// The contents of a mx-tester.yaml
+#[derive(Debug, TypedBuilder, Deserialize)]
+pub struct Config {
+    /// A name for this test.
+    pub name: String,
+
+    /// Modules to install in Synapse.
+    #[serde(default)]
+    #[builder(default)]
+    pub modules: Vec<ModuleConfig>,
+
+    #[serde(default)]
+    #[builder(default)]
+    /// Values to pass through into the homeserver.yaml for this synapse.
+    pub homeserver: HomeserverConfig,
+
+    #[serde(default)]
+    #[builder(default)]
+    /// A script to run at the end of the setup phase.
+    pub up: Option<Script>,
+
+    #[serde(default)]
+    #[builder(default)]
+    /// The testing script to run.
+    pub run: Option<Script>,
+
+    #[serde(default)]
+    #[builder(default)]
+    /// A script to run at the start of the teardown phase.
+    pub down: Option<DownScript>,
+
+    #[serde(default)]
+    #[builder(default)]
+    /// Configuration for the docker network.
+    pub docker: DockerConfig,
+
+    #[serde(default)]
+    #[builder(default)]
+    /// Any users to register and make available
+    pub users: Vec<User>,
+
+    #[serde(default)]
+    #[builder(default)]
+    /// The version of Synapse to use
+    pub synapse: SynapseVersion,
+}
+
+impl Config {
+    /// Create a map containing the environment variables that are common
+    /// to all scripts.
+    ///
+    /// Callers may add additional variables that are specific to a given
+    /// script step.
+    pub fn shared_env_variables(&self) -> Result<HashMap<&'static OsStr, OsString>, Error> {
+        let synapse_root = self.synapse_root();
+        let script_tmpdir = std::env::temp_dir().join("mx-tester").join("scripts");
+        std::fs::create_dir_all(&script_tmpdir)
+            .with_context(|| format!("Could not create directory {:?}", script_tmpdir,))?;
+        let curdir = std::env::current_dir()?;
+        let mut env: HashMap<&'static OsStr, _> = HashMap::new();
+        env.insert(&*MX_TEST_SYNAPSE_DIR, synapse_root.as_os_str().into());
+        env.insert(&*MX_TEST_SCRIPT_TMPDIR, script_tmpdir.as_os_str().into());
+        env.insert(&*MX_TEST_CWD, curdir.as_os_str().into());
+        Ok(env)
+    }
+
+    /// Patch the homeserver.yaml at the given path (usually one that has been generated by synapse)
     /// with the properties in this struct (which will usually have been provided from mx-tester.yaml)
-    pub fn update_homeserver_config(&self, target_homeserver_config: &Path) -> Result<(), Error> {
-        let config_file = std::fs::File::open(target_homeserver_config)
+    pub fn patch_homeserver_config(&self) -> Result<(), Error> {
+        use serde_yaml::{Mapping, Value as YAML};
+        let target_path = self.synapse_root().join("data").join("homeserver.yaml");
+        let config_file = std::fs::File::open(&target_path)
             .context("Could not open the homeserver.yaml generated by synapse")?;
-        let mut combined_config: serde_yaml::Mapping = serde_yaml::from_reader(config_file)
+        let mut combined_config: Mapping = serde_yaml::from_reader(config_file)
             .context("The homeserver.yaml generated by synapse is invalid")?;
+
         let mut insert_value = |key: &str, value: &str| {
-            combined_config.insert(serde_yaml::Value::from(key), serde_yaml::Value::from(value));
+            combined_config.insert(YAML::from(key), YAML::from(value));
         };
-        insert_value("public_baseurl", &self.public_baseurl);
-        insert_value("server_name", &self.server_name);
+        insert_value("public_baseurl", &self.homeserver.public_baseurl);
+        insert_value("server_name", &self.homeserver.server_name);
         insert_value(
             "registration_shared_secret",
-            &self.registration_shared_secret,
+            &self.homeserver.registration_shared_secret,
         );
-        for (key, value) in &self.extra_fields {
-            combined_config.insert(serde_yaml::Value::from(key.clone()), value.clone());
+
+        // HACK: Unless we're already overwriting listeners, patch `listeners`
+        // to make sure it listens on the ports specified in `docker_config`.
+        if self.homeserver.extra_fields.get("listeners").is_none() {
+            if let Some(listeners) = combined_config.get_mut(&YAML::from("listeners")) {
+                let listeners = listeners
+                    .as_sequence_mut()
+                    .ok_or_else(|| anyhow!("`listeners` should be a sequence"))?;
+                debug!("Listeners: {:?}", listeners);
+
+                // FIXME: For the time being, let's only handle the simplest case.
+                // If we're lucky, we'll be able to find WTH is going on that causes
+                // Synapse to default to 9599 despite the fact that we're specifying 8008
+                // everywhere.
+                for listener in listeners {
+                    let port = listener["port"]
+                        .as_u64()
+                        .ok_or_else(|| anyhow!("`listeners::port` should be a number"))?;
+                    let found = self
+                        .docker
+                        .port_mapping
+                        .iter()
+                        .any(|mapping| mapping.guest as u64 == port);
+                    if !found {
+                        warn!("the generated dockerfile specifies port {}, but that port isn't opened", port);
+                        warn!(
+                            "replacing with port {} (mapped to {})",
+                            self.docker.port_mapping[0].guest, self.docker.port_mapping[0].host
+                        );
+                        listener["port"] = self.docker.port_mapping[0].guest.into()
+                    }
+                }
+            }
         }
-        let mut config_writer = LineWriter::new(std::fs::File::create(&target_homeserver_config)?);
+
+        // Copy extra fields.
+        for (key, value) in &self.homeserver.extra_fields {
+            combined_config.insert(YAML::from(key.clone()), value.clone());
+        }
+
+        // Copy modules config.
+        let modules_key = "modules".into();
+        if !combined_config.contains_key(&modules_key)
+            || combined_config.get(&modules_key).unwrap().is_null()
+        {
+            combined_config.insert(modules_key.clone(), YAML::Sequence(vec![].into()));
+        }
+        let modules_root = combined_config
+            .get_mut(&modules_key)
+            .unwrap() // Checked above
+            .as_sequence_mut()
+            .ok_or_else(|| anyhow!("In homeserver.yaml, expected a sequence for key `modules`"))?;
+        for module in &self.modules {
+            modules_root.push(module.config.clone());
+        }
+        let mut config_writer = LineWriter::new(std::fs::File::create(&target_path)?);
         config_writer
             .write_all(
                 &serde_yaml::to_vec(&combined_config)
@@ -142,44 +302,41 @@ impl HomeserverConfig {
             .context("Could not write combined homeserver config")?;
         Ok(())
     }
-    pub fn registration_shared_secret_default() -> String {
-        "MX_TESTER_REGISTRATION_DEFAULT".to_string()
+
+    /// The directory in which we're putting all data for this test.
+    ///
+    /// Cleaned up upon test start.
+    pub fn test_root(&self) -> PathBuf {
+        std::env::temp_dir().join("mx-tester").join(&self.name)
     }
-}
 
-/// The contents of a mx-tester.yaml
-#[derive(Debug, Default, Deserialize)]
-pub struct Config {
-    /// A name for this test.
-    pub name: String,
+    /// The directory in which we're putting synapse data for this test.
+    ///
+    /// It will contain, among other things, the logs for the test.
+    pub fn synapse_root(&self) -> PathBuf {
+        self.test_root().join("synapse")
+    }
 
-    /// Modules to install in Synapse.
-    #[serde(default)]
-    pub modules: Vec<ModuleConfig>,
+    /// A tag for the Docker image we're creating/using.
+    pub fn tag(&self) -> String {
+        match self.synapse {
+            SynapseVersion::ReleasedDockerImage => format!("mx-tester-synapse-{}", self.name),
+        }
+    }
 
-    #[serde(default)]
-    /// Values to pass through into the homeserver.yaml for this synapse.
-    pub homeserver_config: HomeserverConfig,
+    pub fn network(&self) -> String {
+        self.tag()
+    }
 
-    #[serde(default)]
-    /// A script to run at the end of the setup phase.
-    pub up: Option<Script>,
+    /// The name for the container we're using to setup Synapse.
+    pub fn setup_container_name(&self) -> String {
+        format!("mx-tester-synapse-setup-{}", self.name)
+    }
 
-    #[serde(default)]
-    /// The testing script to run.
-    pub run: Option<Script>,
-
-    #[serde(default)]
-    /// A script to run at the start of the teardown phase.
-    pub down: Option<DownScript>,
-
-    #[serde(default)]
-    /// Configuration for the docker network.
-    pub docker_config: DockerConfig,
-
-    #[serde(default)]
-    /// Any users to register and make available
-    pub users: Vec<User>,
+    /// The name for the container we're using to actually run Synapse.
+    pub fn run_container_name(&self) -> String {
+        format!("mx-tester-synapse-run-{}", self.name)
+    }
 }
 
 /// The result of the test, as seen by `down()`.
@@ -194,46 +351,17 @@ pub enum Status {
     Manual,
 }
 
+#[derive(Debug, Deserialize)]
 pub enum SynapseVersion {
+    #[serde(rename = "matrixdotorg/synapse:latest")]
     /// The latest version of Synapse released on https://hub.docker.com/r/matrixdotorg/synapse/
     ReleasedDockerImage,
     // FIXME: Allow using a version of Synapse that lives in a local directory
     // (this will be sufficient to also implement pulling from github develop)
 }
-impl SynapseVersion {
-    pub fn tag(&self) -> Cow<'static, OsStr> {
-        let tag: &'static OsStr = PATCHED_IMAGE_DOCKER_TAG.as_ref();
-        tag.into()
-    }
-}
-
-/// The configuration for a single synapse container.
-/// We copy some fields from the main config for simplicity.
-#[derive(Debug)]
-pub struct ContainerConfig {
-    /// The docker port configuration. e.g. `9999:9999`.
-    pub port_mapping: String,
-    /// The hostname of the synapse container.
-    pub hostname: String,
-    /// The name of a docker network to place the container in.
-    pub docker_network: Option<String>,
-    /// The URL that can be used to access this container from the host.
-    pub public_url: String,
-    /// The name of the synapse server.
-    pub server_name: String,
-}
-
-impl TryFrom<&Config> for ContainerConfig {
-    type Error = Error;
-    fn try_from(config: &Config) -> Result<ContainerConfig, Error> {
-        let homeserver_config = &config.homeserver_config;
-        Ok(ContainerConfig {
-            docker_network: config.docker_config.docker_network.clone(),
-            port_mapping: config.docker_config.port_mapping.clone(),
-            hostname: config.docker_config.hostname.clone(),
-            public_url: homeserver_config.public_baseurl.clone(),
-            server_name: homeserver_config.server_name.clone(),
-        })
+impl Default for SynapseVersion {
+    fn default() -> Self {
+        Self::ReleasedDockerImage
     }
 }
 
@@ -249,47 +377,19 @@ pub struct Script {
     lines: Vec<String>,
 }
 impl Script {
-    /// Substitute anything that looks like the use of environment variable such as $A or ${B} using the entries to the hash map provided.
-    /// If there is no matching table entry for $FOO then it will remain as $FOO in the script line.
-    fn substitute_env_vars<'a>(
-        line: &'a str,
-        env: &HashMap<&'static OsStr, OsString>,
-    ) -> Cow<'a, str> {
-        shellexpand::env_with_context_no_errors(line, |str| match env.get(OsStr::new(str)) {
-            Some(value) => value.to_str(),
-            _ => None,
-        })
-    }
-    /// Parse a line of script into a std::process::Command and its arguments.
-    /// Returns None when there is no command token in the line (e.g. just whitespace).
-    fn parse_command(&self, line: &str) -> Option<std::process::Command> {
-        let tokens = comma::parse_command(line)?;
-        let mut token_stream = tokens.iter();
-        let mut command = std::process::Command::new(OsString::from(token_stream.next()?));
-        for token in token_stream {
-            command.arg(token);
-        }
-        Some(command)
-    }
     pub fn run(&self, env: &HashMap<&'static OsStr, OsString>) -> Result<(), Error> {
         debug!("Running with environment variables {:#?}", env);
         for line in &self.lines {
-            let line = Script::substitute_env_vars(line, env);
-            let mut command = match self.parse_command(&line) {
-                Some(command) => command,
-                None => {
-                    warn!("Skipping empty line in script {:?}", self.lines);
-                    continue;
-                }
-            };
-            let status = command.envs(env).spawn()?.wait()?;
-            if !status.success() {
-                return Err(anyhow!(
-                    "Error running command `{line}`: {status}",
-                    line = line,
-                    status = status
-                ));
+            let mut exec = ezexec::ExecBuilder::with_shell(line).map_err(|err| {
+                anyhow!("Could not interpret `{}` as shell script: {}", line, err)
+            })?;
+            for (key, val) in env {
+                exec.set_env(key, val);
             }
+            exec.spawn_transparent()
+                .map_err(|err| anyhow!("Error executing `{}`: {}", line, err))?
+                .wait()
+                .map_err(|err| anyhow!("Error during `{}`: {}", line, err))?;
         }
         Ok(())
     }
@@ -305,7 +405,26 @@ pub struct ModuleConfig {
 
     /// A script to build and copy the module in the directory
     /// specified by environment variable `MX_TEST_MODULE_DIR`.
+    ///
+    /// This script will be executed in the **host**.
     build: Script,
+
+    /// A script to install dependencies.
+    ///
+    /// This script will be executed in the **guest**.
+    #[serde(default)]
+    install: Option<Script>,
+
+    /// A Yaml config to copy into homeserver.yaml.
+    /// See https://matrix-org.github.io/synapse/latest/modules/index.html
+    ///
+    /// This typically looks like
+    /// ```yaml
+    /// module: python_module_name
+    /// config:
+    ///   key: value
+    /// ```
+    config: serde_yaml::Value,
 }
 
 /// A script for `down`.
@@ -323,38 +442,266 @@ pub struct DownScript {
     finally: Option<Script>,
 }
 
-/// Create a map containing the environment variables that are common
-/// to all scripts.
+/// Start a Synapse container.
 ///
-/// Callers may add additional variables that are specific to a given
-/// script step.
-fn shared_env_variables() -> Result<HashMap<&'static OsStr, OsString>, Error> {
-    let synapse_root = synapse_root();
-    let script_tmpdir = std::env::temp_dir().join("mx-tester").join("scripts");
-    std::fs::create_dir_all(&script_tmpdir)
-        .with_context(|| format!("Could not create directory {:?}", script_tmpdir,))?;
-    let curdir = std::env::current_dir()?;
-    let mut env: HashMap<&'static OsStr, _> = HashMap::new();
-    env.insert(&*MX_TEST_SYNAPSE_DIR, synapse_root.as_os_str().into());
-    env.insert(&*MX_TEST_SCRIPT_TMPDIR, script_tmpdir.as_os_str().into());
-    env.insert(&*MX_TEST_CWD, curdir.as_os_str().into());
-    Ok(env)
-}
+/// - `cmd`: a shell command to execute;
+/// - `detach`: if `true`, the Synapse container will continue executing past the end of this function and process;
+async fn start_synapse_container(
+    docker: &Docker,
+    config: &Config,
+    data_dir: &Path,
+    container_name: &str,
+    cmd: Vec<String>,
+    detach: bool,
+) -> Result<(), Error> {
+    let is_container_created = docker.is_container_created(container_name).await?;
+    if is_container_created {
+        debug!("NO need to create container for {}", container_name);
+    } else {
+        debug!("We need to create container for {}", container_name);
+        let mut env = vec![
+            format!("SYNAPSE_SERVER_NAME={}", config.homeserver.server_name),
+            "SYNAPSE_REPORT_STATS=no".into(),
+            "SYNAPSE_CONFIG_DIR=/data".into(),
+            format!(
+                "SYNAPSE_HTTP_PORT={}",
+                config
+                    .docker
+                    .port_mapping
+                    .get(0)
+                    .ok_or_else(|| anyhow!(
+                        "In mx-tester.yml, an empty port mapping was specified"
+                    ))?
+                    .guest
+            ),
+        ];
+        // Ensure that the config files and media can be deleted by the user
+        // who launched the program by giving synapse the same uid/gid.
+        #[cfg(unix)]
+        {
+            env.push(format!("UID={}", nix::unistd::getuid()));
+            env.push(format!("GID={}", nix::unistd::getegid()));
+        }
 
-fn synapse_root() -> PathBuf {
-    std::env::temp_dir().join("mx-tester").join("synapse")
+        // Generate configuration to open and map ports.
+        let host_port_bindings = config
+            .docker
+            .port_mapping
+            .iter()
+            .map(|mapping| {
+                (
+                    format!("{}/tcp", mapping.guest),
+                    Some(vec![PortBinding {
+                        host_port: Some(format!("{}", mapping.host)),
+                        ..PortBinding::default()
+                    }]),
+                )
+            })
+            .collect();
+        let exposed_ports = config
+            .docker
+            .port_mapping
+            .iter()
+            .map(|mapping| (format!("{}/tcp", mapping.guest), HashMap::new()))
+            .collect();
+        debug!("port_bindings: {:?}", host_port_bindings);
+
+        debug!("Creating container {}", container_name);
+        let response = docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: container_name,
+                }),
+                BollardContainerConfig {
+                    env: Some(env),
+                    exposed_ports: Some(exposed_ports),
+                    hostname: Some(config.docker.hostname.clone()),
+                    host_config: Some(HostConfig {
+                        log_config: Some(HostConfigLogConfig {
+                            typ: Some("json-file".to_string()),
+                            config: None,
+                        }),
+                        // Extremely large memory allowance.
+                        memory_reservation: Some(MEMORY_ALLOCATION_BYTES),
+                        memory_swap: Some(-1),
+                        // Mount guest directory `/data` into the host synapse data directory.
+                        binds: Some(vec![format!(
+                            "{}:/data",
+                            data_dir.as_os_str().to_string_lossy()
+                        )]),
+                        // Expose guest port `guest_mapping` as `host_mapping`.
+                        port_bindings: Some(host_port_bindings),
+                        ..HostConfig::default()
+                    }),
+                    image: Some(config.tag()),
+                    attach_stderr: Some(true),
+                    attach_stdout: Some(true),
+                    attach_stdin: Some(false),
+                    cmd: Some(cmd.clone()),
+                    // Specify that `/data` may be mounted.
+                    volumes: Some(
+                        vec![("/data".to_string(), HashMap::new())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    tty: Some(false),
+                    ..BollardContainerConfig::default()
+                },
+            )
+            .await
+            .context("Failed to build container")?;
+
+        // For debugging purposes, try and find out when/why the container stops.
+        let mut wait = docker.wait_container(
+            container_name,
+            Some(WaitContainerOptions {
+                condition: "not-running",
+            }),
+        );
+        {
+            let container_name = container_name.to_string();
+            tokio::task::spawn(async move {
+                debug!(target: "mx-tester-wait", "{} Container started", container_name);
+                while let Some(next) = wait.next().await {
+                    let response = next.context("Error while waiting for container to stop")?;
+                    debug!(target: "mx-tester-wait", "{} {:?}", container_name, response);
+                }
+                debug!(target: "mx-tester-wait", "{} Container is now down", container_name);
+                Ok::<(), Error>(())
+            });
+        }
+
+        for warning in response.warnings {
+            warn!(target: "creating-container", "{}", warning);
+        }
+    }
+
+    // ... add the container to the network.
+    docker
+        .connect_network(
+            config.network().as_ref(),
+            ConnectNetworkOptions {
+                container: container_name,
+                endpoint_config: EndpointSettings::default(),
+            },
+        )
+        .await
+        .context("Failed to connect container")?;
+
+    let is_container_running = docker.is_container_running(container_name).await?;
+    if !is_container_running {
+        docker
+            .start_container(container_name, None::<StartContainerOptions<String>>)
+            .await
+            .context("Failed to start container")?;
+        let mut logs = docker.logs(
+            container_name,
+            Some(LogsOptions {
+                follow: true,
+                stdout: true,
+                stderr: true,
+                tail: "10",
+                ..LogsOptions::default()
+            }),
+        );
+
+        // Write logs to the synapse data directory.
+        let mut log_file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(data_dir.join(format!("mx-tester-{}.log", container_name)))
+            .await?;
+        tokio::task::spawn(async move {
+            debug!(target: "mx-tester-log", "Starting log watcher");
+            while let Some(next) = logs.next().await {
+                match next {
+                    Ok(content) => {
+                        debug!(target: "mx-tester-log", "{}", content);
+                        log_file
+                            .write_all(format!("{}", content).as_bytes())
+                            .await?;
+                    }
+                    Err(err) => {
+                        error!(target: "mx-tester-log", "{}", err);
+                        log_file
+                            .write_all(format!("ERROR: {}", err).as_bytes())
+                            .await?;
+                        return Err(err).context("Error in log");
+                    }
+                }
+            }
+            debug!(target: "mx-tester-log", "Stopped log watcher");
+            Ok(())
+        });
+    }
+
+    let exec = docker
+        .create_exec(
+            container_name,
+            CreateExecOptions::<Cow<'_, str>> {
+                cmd: Some(cmd.into_iter().map(|s| s.into()).collect()),
+                ..CreateExecOptions::default()
+            },
+        )
+        .await
+        .context("Error while preparing to Synapse container")?;
+    let execution = docker
+        .start_exec(&exec.id, Some(StartExecOptions { detach }))
+        .await
+        .context("Error starting Synapse container")?;
+
+    if !detach {
+        let mut log_file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(data_dir.join(format!("mx-tester-{}.out.log", container_name)))
+            .await?;
+        tokio::task::spawn(async move {
+            debug!(target: "synapse", "Launching Synapse container");
+            match execution {
+                bollard::exec::StartExecResults::Attached {
+                    mut output,
+                    input: _,
+                } => {
+                    while let Some(data) = output.next().await {
+                        let output = data.context("Error during run")?;
+                        debug!(target: "synapse", "{}", output);
+                        log_file.write_all(format!("{}", output).as_bytes()).await?
+                    }
+                }
+                bollard::exec::StartExecResults::Detached => panic!(),
+            }
+            debug!(target: "synapse", "Synapse container finished");
+            Ok::<(), Error>(())
+        })
+        .await??;
+    }
+
+    Ok(())
 }
 
 /// Rebuild the Synapse image with modules.
-pub fn build(config: &[ModuleConfig], version: &SynapseVersion) -> Result<(), Error> {
+pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
-    let SynapseVersion::ReleasedDockerImage = *version;
-    let synapse_root = synapse_root();
+    let SynapseVersion::ReleasedDockerImage = config.synapse;
+    let setup_container_name = config.setup_container_name();
+    let run_container_name = config.run_container_name();
+
+    // Remove any trace of a previous build. Ignore failures.
+    let _ = docker.stop_container(&run_container_name, None).await;
+    let _ = docker.remove_container(&run_container_name, None).await;
+    let _ = docker.stop_container(&setup_container_name, None).await;
+    let _ = docker.remove_container(&setup_container_name, None).await;
+    let _ = docker.remove_image(config.tag().as_ref(), None, None).await;
+
+    let synapse_root = config.synapse_root();
+    let _ = std::fs::remove_dir_all(config.test_root());
     std::fs::create_dir_all(&synapse_root)
         .with_context(|| format!("Could not create directory {:?}", synapse_root,))?;
+
     // Build modules
-    let mut env = shared_env_variables()?;
-    for module in config {
+    let mut env = config.shared_env_variables()?;
+    for module in &config.modules {
         let path = synapse_root.join(&module.name);
         env.insert(&*MX_TEST_MODULE_DIR, path.as_os_str().into());
         debug!(
@@ -383,333 +730,163 @@ RUN pip show matrix-synapse
 # Copy and install custom modules.
 RUN mkdir /mx-tester
 {copy}
+{setup}
 
 VOLUME [\"/data\"]
-
+ENTRYPOINT []
+ENV SYNAPSE_HTTP_PORT=8008
 EXPOSE 8008/tcp 8009/tcp 8448/tcp
 ",
-    copy = config.iter()
+    copy = config.modules.iter()
         // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
         .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
+        .format("\n"),
+    setup = config.modules.iter()
+        .filter_map(|module| match module.install {
+            None => None,
+            Some(ref script) => Some(format!("## Install {}\n{}\n", module.name, script.lines.iter().map(|line| format!("RUN {}", line)).format("\n")))
+        })
         .format("\n")
 );
     debug!("dockerfile {}", dockerfile_content);
 
-    let docker_dir_path = std::env::temp_dir().join("mx-tester").join("docker");
-    std::fs::create_dir_all(&docker_dir_path)
-        .with_context(|| format!("Could not create directory {:?}", docker_dir_path,))?;
-    let dockerfile_path = docker_dir_path.join("Dockerfile");
+    let dockerfile_path = synapse_root.join("Dockerfile");
     std::fs::write(&dockerfile_path, dockerfile_content)
         .with_context(|| format!("Could not write file {:?}", dockerfile_path,))?;
 
-    debug!("Building image with tag {:?}", version.tag());
-    if std::process::Command::new("docker")
-        .arg("build")
-        .args(["--pull", "--no-cache"])
-        .arg("-t")
-        .arg(version.tag())
-        .arg("-f")
-        .arg(&dockerfile_path)
-        .arg(&synapse_root)
-        .spawn()
-        .context("Error launching `docker build`")?
-        .wait()
-        .context("Error waiting for `docker build`")?
-        .success()
-        .not()
+    debug!("Building tar file");
+    let docker_dir_path = std::env::temp_dir().join("mx-tester").join("tar");
+    std::fs::create_dir_all(&docker_dir_path)
+        .with_context(|| format!("Could not create directory {:?}", docker_dir_path,))?;
+    let body = {
+        // Build the tar file.
+        let tar_path = docker_dir_path.join("docker.tar");
+        {
+            let tar_file = std::fs::File::create(&tar_path)?;
+            let mut tar_builder = tar::Builder::new(tar_file);
+            debug!("tar: adding directory {:?}", synapse_root);
+            tar_builder.append_dir_all("", &synapse_root)?;
+            tar_builder.finish()?;
+        }
+
+        let tar_file = tokio::fs::File::open(&tar_path).await?;
+        let stream = FramedRead::new(tar_file, BytesCodec::new());
+        hyper::Body::wrap_stream(stream)
+    };
+    debug!("Building image with tag {}", config.tag());
     {
-        return Err(anyhow!("Command `docker build` indicated an error"));
+        let mut stream = docker.build_image(
+            bollard::image::BuildImageOptions {
+                pull: true,
+                nocache: true,
+                t: config.tag(),
+                q: true,
+                rm: true,
+                ..Default::default()
+            },
+            None,
+            Some(body),
+        );
+        while let Some(result) = stream.next().await {
+            let info = result.context("Daemon `docker build` indicated an error")?;
+            if let Some(ref error) = info.error {
+                return Err(anyhow!(
+                    "Error while building an image {}: {:?}",
+                    error,
+                    info.error_detail
+                ));
+            }
+            debug!("Build image progress {:?}", info);
+        }
     }
-
+    debug!("Image built");
     Ok(())
-}
-
-/// Generate the data directory and default synapse configuration.
-fn generate(
-    synapse_data_directory: &Path,
-    container_config: &ContainerConfig,
-) -> Result<(), Error> {
-    // FIXME: I think we're creating tonnes of unnamed garbage containers each time we run this.
-    let mut command = std::process::Command::new("docker");
-    command
-        .arg("run")
-        .arg("-e")
-        // FIXME: Use server name from config.
-        .arg(format!(
-            "SYNAPSE_SERVER_NAME={}",
-            container_config.server_name
-        ))
-        .arg("-e")
-        .arg("SYNAPSE_REPORT_STATS=no")
-        .arg("-e")
-        .arg("SYNAPSE_CONFIG_DIR=/data");
-    // Ensure that the config files and media can be deleted by the user
-    // who launched the program by giving synapse the same uid/gid.
-    #[cfg(unix)]
-    command
-        .arg("-e")
-        .arg(format!("UID={}", nix::unistd::getuid()))
-        .arg("-e")
-        .arg(format!("GID={}", nix::unistd::getegid()));
-    if command
-        .arg("-p")
-        .arg(&container_config.port_mapping)
-        .arg("-v")
-        .arg(format!(
-            "{}:/data",
-            &synapse_data_directory
-                .to_str()
-                .context("Invalid synapse data directory")?
-        ))
-        .arg(&*PATCHED_IMAGE_DOCKER_TAG)
-        .arg("generate")
-        .spawn()
-        .context("Error launching `docker run` to generate synapse configuration")?
-        .wait()
-        .context("Error waiting for `docker run` to generate synapse configuration")?
-        .success()
-        .not()
-    {
-        return Err(anyhow!(
-            "Command `docker run` to generate synapse configuration indicated an error"
-        ));
-    }
-    Ok(())
-}
-
-/// Ensures that a container is running for the synapse image.
-/// If a network is provided then the container will be given the hostname `synapse`.
-fn up_image(
-    synapse_data_directory: &Path,
-    container_config: &ContainerConfig,
-    create_new_container: bool,
-) -> Result<(), Error> {
-    let container_name = "mx-tester_synapse";
-    let container_up = is_container_up(container_name)?;
-    if container_up && create_new_container {
-        container_stop(container_name).context("Error stopping container")?;
-    } else if container_up {
-        return Ok(());
-    }
-    if is_container_built(container_name)? {
-        container_rm(container_name).context("Error removing container")?;
-    }
-    let mut command = std::process::Command::new("docker");
-    command.arg("run");
-    if let Some(ref network) = container_config.docker_network {
-        command
-            .arg("--network")
-            .arg(network)
-            .arg("--hostname")
-            .arg(&container_config.hostname);
-    }
-    // Ensure that the config files and media can be deleted by the user
-    // who launched the program by giving synapse the same uid/gid.
-    #[cfg(unix)]
-    command
-        .arg("-e")
-        .arg(format!("UID={}", nix::unistd::getuid()))
-        .arg("-e")
-        .arg(format!("GID={}", nix::unistd::getegid()));
-    command
-        .arg("--detach")
-        .arg("--name")
-        .arg("mx-tester_synapse")
-        .arg("-p")
-        .arg(&container_config.port_mapping)
-        .arg("-v")
-        .arg(format!(
-            "{}:{}",
-            &synapse_data_directory
-                .to_str()
-                .context("Invalid synapse data directory")?,
-            "/data"
-        ))
-        .arg(&*PATCHED_IMAGE_DOCKER_TAG);
-    if command
-        .spawn()
-        .context("Error launching `docker run` to create directories")?
-        .wait()
-        .context("Error waiting for `docker run` to create directories")?
-        .success()
-        .not()
-    {
-        return Err(anyhow!("Command `docker run` indicated an error"));
-    }
-    Ok(())
-}
-
-/// Check whether the named container is currently up.
-fn is_container_up(container_name: &str) -> Result<bool, Error> {
-    let mut command = std::process::Command::new("docker");
-    command
-        .arg("container")
-        .arg("ps")
-        .arg("--no-trunc")
-        .arg("--filter")
-        .arg(format!("name={}", container_name));
-    let output = command.output()?;
-    debug!(
-        "is_container_up name={} output: {:?}",
-        container_name, output
-    );
-    let all_output = String::from_utf8(output.stdout)
-        .context("The output of `docker container ps` is invalid utf8")?;
-    Ok(all_output.contains(container_name))
-}
-
-/// Check whether a container with this name has been built already.
-fn is_container_built(container_name: &str) -> Result<bool, Error> {
-    let mut command = std::process::Command::new("docker");
-    command
-        .arg("container")
-        .arg("ls")
-        .arg("-a")
-        .arg("--no-trunc")
-        .arg("--filter")
-        .arg(format!("name={}", container_name));
-    let output = command.output()?;
-    debug!(
-        "is_container_built name={} output: {:?}",
-        container_name, output
-    );
-    let all_output = String::from_utf8(output.stdout)
-        .context("The output of `docker container ls` is invalid utf8")?;
-    Ok(all_output.contains(container_name))
-}
-
-/// Remove the named container.
-fn container_rm(container_name: &str) -> Result<(), Error> {
-    let mut command = std::process::Command::new("docker");
-    if command
-        .arg("container")
-        .arg("rm")
-        .arg(container_name)
-        .spawn()
-        .context("Error launching `docker container rm`")?
-        .wait()
-        .context("Error waiting for `docker container rm`")?
-        .success()
-        .not()
-    {
-        return Err(anyhow!("Command `docker container rm` indicated an error"));
-    }
-    Ok(())
-}
-
-/// Create a docker network and give a name.
-fn create_network(network_name: &str) -> Result<(), Error> {
-    let mut command = std::process::Command::new("docker");
-    command
-        .arg("network")
-        .arg("create")
-        .arg(network_name)
-        .output()?;
-    Ok(())
-}
-
-/// Check if the named docker network has previously been created.
-fn is_network_created(network_name: &str) -> Result<bool, Error> {
-    let mut command = std::process::Command::new("docker");
-    command
-        .arg("network")
-        .arg("ls")
-        .arg("--no-trunc")
-        .arg("--filter")
-        .arg(format!("name={}", network_name));
-    let output = command.output()?;
-    debug!(
-        "is_network_created name={} output: {:?}",
-        network_name, output
-    );
-    let all_output = String::from_utf8(output.stdout)
-        .context("The output of `docker network ls` is invalid utf")?;
-    Ok(all_output.contains(network_name))
-}
-
-/// Ensure the named docker network exists.
-fn ensure_network_exists(network_name: &str) -> Result<bool, Error> {
-    let network_exists = is_network_created(network_name)?;
-    if !network_exists {
-        create_network(network_name)?;
-    }
-    Ok(network_exists)
 }
 
 /// Bring things up. Returns any environment variables to pass to the run script.
-pub async fn up(
-    version: &SynapseVersion,
-    config: &Config,
-    container_config: &ContainerConfig,
-    homeserver_config: &HomeserverConfig,
-) -> Result<(), Error> {
+pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
     let SynapseVersion::ReleasedDockerImage = *version;
+    let setup_container_name = config.setup_container_name();
+    let run_container_name = config.run_container_name();
 
-    let synapse_data_directory = synapse_root().join("data");
+    // Create the network if necessary.
+    // We'll add the container once it's available.
+    let network_name = config.network();
+    if !docker.is_network_up(&network_name).await? {
+        docker
+            .create_network(CreateNetworkOptions {
+                name: network_name.as_str(),
+                ..CreateNetworkOptions::default()
+            })
+            .await?;
+    }
+
+    // Create the synapse data directory.
+    // We'll use it as volume.
+    let synapse_data_directory = config.synapse_root().join("data");
     std::fs::create_dir_all(&synapse_data_directory)
         .with_context(|| format!("Cannot create directory {:?}", synapse_data_directory))?;
-    if let Some(ref docker_network) = container_config.docker_network {
-        ensure_network_exists(docker_network)?;
-    }
-    debug!("generating synapse data");
-    generate(&synapse_data_directory, container_config)
-        .context("Error while generating synapse data")?;
-    debug!("done generating");
-    // Apply config from mx-tester.yml to the homeserver.yaml that was just made
-    homeserver_config
-        .update_homeserver_config(&synapse_data_directory.join("homeserver.yaml"))
-        .context("Error updating homeserver config")?;
-    // FIXME: Allow configuration of recreating container if the image has been rebuilt.
-    up_image(&synapse_data_directory, container_config, false)
-        .context("Error bringing up image")?;
+    // Cleanup leftovers.
+    let _ = std::fs::remove_file(synapse_data_directory.join("homeserver.yaml"));
 
-    for user in &config.users {
-        ensure_user_exists(
-            &config.homeserver_config.public_baseurl,
-            &config.homeserver_config.registration_shared_secret,
-            user,
-        )
+    // Start a container to generate homeserver.yaml.
+    start_synapse_container(
+        docker,
+        config,
+        &synapse_data_directory,
+        &setup_container_name,
+        vec!["/start.py".to_string(), "generate".to_string()],
+        false,
+    )
+    .await
+    .context("Couldn't generate homeserver.yaml")?;
+
+    // HACK: I haven't found a way to reuse the container with a different cmd
+    // (the API looks like it supports overriding cmds when creating an
+    // Exec but doesn't seem to actually implement this feature), so
+    // we stop and remove the container, we'll create a new one when
+    // we're ready to start Synapse.
+    debug!("done generating");
+    let _ = docker.stop_container(&setup_container_name, None).await;
+    let _ = docker.remove_container(&setup_container_name, None).await;
+
+    // Apply config from mx-tester.yml to the homeserver.yaml that was just created
+    config
+        .patch_homeserver_config()
+        .context("Error updating homeserver config")?;
+
+    // It's now time to run Synapse.
+    start_synapse_container(
+        docker,
+        config,
+        &synapse_data_directory,
+        &run_container_name,
+        vec!["/start.py".to_string()],
+        true,
+    )
+    .await
+    .context("Failed to start Synapse")?;
+
+    debug!("Synapse is now launched");
+    handle_user_registration(&config)
         .await
-        .with_context(|| anyhow!("Could not setup user {}", user.localname))?;
-    }
+        .context("Failed to setup users")?;
     if let Some(ref script) = config.up {
-        let env = shared_env_variables()?;
+        let env = config.shared_env_variables()?;
         script.run(&env).context("Error running `up` script")?;
     }
     Ok(())
 }
 
-/// Stop a container.
-pub fn container_stop(container_name: &str) -> Result<(), Error> {
-    if std::process::Command::new("docker")
-        .arg("stop")
-        .arg(container_name)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .context("Error launching `docker stop`")?
-        .wait()
-        .context("Error waiting for `docker stop`")?
-        .success()
-        .not()
-    {
-        return Err(anyhow!("Command `docker stop` indicated an error"));
-    }
-    Ok(())
-}
-
 /// Bring things down.
-pub fn down(
-    version: &SynapseVersion,
-    script: &Option<DownScript>,
-    status: Status,
-) -> Result<(), Error> {
+pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
-    let SynapseVersion::ReleasedDockerImage = *version;
+    let SynapseVersion::ReleasedDockerImage = config.synapse;
+    let run_container_name = config.run_container_name();
 
-    if let Some(ref down_script) = *script {
-        let env = shared_env_variables()?;
+    if let Some(ref down_script) = config.down {
+        let env = config.shared_env_variables()?;
         // First run on_failure/on_success.
         // Store errors for later.
         let result = match (status, down_script) {
@@ -742,16 +919,88 @@ pub fn down(
         // Report any error from `on_failure` or `on_success`.
         result?
     }
-    debug!("Taking down synapse.");
-    container_stop("mx-tester_synapse").context("Error stopping container")?;
+    debug!(target: "mx-tester-down", "Taking down synapse.");
+    match docker.stop_container(&run_container_name, None).await {
+        Err(bollard::errors::Error::DockerResponseNotModifiedError { .. }) => {
+            // Synapse is already down.
+            debug!(target: "mx-tester-down", "Synapse was already down");
+        }
+        Err(bollard::errors::Error::DockerResponseNotFoundError { .. }) => {
+            // Synapse is already down.
+            debug!(target: "mx-tester-down", "No Synapse container");
+        }
+        Ok(_) => {
+            debug!(target: "mx-tester-down", "Synapse taken down");
+        }
+        Err(err) => {
+            return Err(err).context("Error stopping container");
+        }
+    }
     Ok(())
 }
 
 /// Run the testing script.
-pub fn run(config: &Config) -> Result<(), Error> {
+pub fn run(_docker: &Docker, config: &Config) -> Result<(), Error> {
     if let Some(ref code) = config.run {
-        let env = shared_env_variables()?;
+        let env = config.shared_env_variables()?;
         code.run(&env).context("Error running `run` script")?;
     }
     Ok(())
+}
+
+/// Utility methods for `Docker`.
+#[async_trait::async_trait]
+trait DockerExt {
+    /// Check whether a network exists.
+    async fn is_network_up(&self, name: &str) -> Result<bool, Error>;
+
+    /// Check whether a container is currently running.
+    async fn is_container_running(&self, name: &str) -> Result<bool, Error>;
+
+    /// Check whether a container has been created (running or otherwise).
+    async fn is_container_created(&self, name: &str) -> Result<bool, Error>;
+}
+
+#[async_trait::async_trait]
+impl DockerExt for Docker {
+    /// Check whether a network exists.
+    async fn is_network_up(&self, name: &str) -> Result<bool, Error> {
+        let networks = self
+            .list_networks(Some(ListNetworksOptions {
+                filters: vec![("name", vec![name])].into_iter().collect(),
+            }))
+            .await?;
+        debug!("is_network_up {:?}", networks);
+        Ok(networks.is_empty().not())
+    }
+
+    /// Check whether a container is currently running.
+    async fn is_container_running(&self, name: &str) -> Result<bool, Error> {
+        let containers = self
+            .list_containers(Some(ListContainersOptions {
+                // Check for running containers only
+                all: false,
+                // FIXME: This filter seems to filter by substring. That's... not reliable.
+                filters: vec![("name", vec![name])].into_iter().collect(),
+                ..ListContainersOptions::default()
+            }))
+            .await?;
+        debug!("is_container_running {:?}", containers);
+        Ok(containers.is_empty().not())
+    }
+
+    /// Check whether a container has been created (running or otherwise).
+    async fn is_container_created(&self, name: &str) -> Result<bool, Error> {
+        let containers: Vec<_> = self
+            .list_containers(Some(ListContainersOptions {
+                // Check for both running and non-running containers.
+                all: true,
+                // FIXME: This filter seems to filter by substring. That's... not reliable.
+                filters: vec![("name", vec![name])].into_iter().collect(),
+                ..ListContainersOptions::default()
+            }))
+            .await?;
+        debug!("is_container_created {:?}", containers);
+        Ok(containers.is_empty().not())
+    }
 }

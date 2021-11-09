@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::convert::TryFrom;
-
 use log::*;
 use mx_tester::*;
 
@@ -58,10 +56,6 @@ async fn main() {
         .unwrap_or_else(|err| panic!("Invalid config file `{}`: {}", config_path, err));
     debug!("Config: {:2?}", config);
 
-    // Extract container config from the docker config and the homeserver config.
-    let container_config = ContainerConfig::try_from(&config)
-        .unwrap_or_else(|e| panic!("There is a property missing from the config {}", e));
-
     let commands = match matches.values_of("command") {
         None => vec![Command::Up, Command::Run, Command::Down],
         Some(values) => values
@@ -75,6 +69,7 @@ async fn main() {
             .collect(),
     };
     debug!("Running {:?}", commands);
+    debug!("Root: {:?}", config.test_root());
 
     // Now run the scripts.
     // We stop immediately if `build` or `up` fails but if `run` fails,
@@ -84,6 +79,14 @@ async fn main() {
 
     let synapse_version = SynapseVersion::ReleasedDockerImage;
 
+    if commands.is_empty() {
+        // No need to initialize Docker.
+        return;
+    }
+
+    let docker = bollard::Docker::connect_with_local_defaults()
+        .expect("Failed to connect to the Docker daemon");
+
     // Store the results of a `run` command in case it's followed by
     // a `down` command, which needs to decide between a success path
     // and a failure path.
@@ -92,22 +95,17 @@ async fn main() {
         match command {
             Command::Build => {
                 info!("mx-tester build...");
-                build(&config.modules, &synapse_version).expect("Error in `build`");
+                build(&docker, &config).await.expect("Error in `build`");
             }
             Command::Up => {
                 info!("mx-tester up...");
-                up(
-                    &synapse_version,
-                    &config,
-                    &container_config,
-                    &config.homeserver_config,
-                )
-                .await
-                .unwrap_or_else(|e| panic!("Error in `up`: {}", e));
+                up(&docker, &synapse_version, &config)
+                    .await
+                    .expect("Error in `up`");
             }
             Command::Run => {
                 info!("mx-tester run...");
-                result_run = Some(run(&config));
+                result_run = Some(run(&docker, &config));
             }
             Command::Down => {
                 info!("mx-tester down...");
@@ -116,7 +114,7 @@ async fn main() {
                     Some(Ok(_)) => Status::Success,
                     Some(Err(_)) => Status::Failure,
                 };
-                let result_down = down(&synapse_version, &config.down, status);
+                let result_down = down(&docker, &config, status).await;
                 if let Some(result_run) = result_run {
                     result_run.expect("Error in `up`");
                 }
