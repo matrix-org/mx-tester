@@ -9,11 +9,7 @@ lazy_static! {
 }
 
 /// The version of Synapse to use for testing.
-///
-/// As of this writing, more recent versions of Synapse suffer from
-/// https://github.com/matrix-org/synapse/issues/11385
-/// which makes them unusable with mx-tester.
-const SYNAPSE_VERSION: &str = "matrixdotorg/synapse:v1.46.0";
+const SYNAPSE_VERSION: &str = "matrixdotorg/synapse:latest";
 
 /// Simple test: empty config.
 #[tokio::test]

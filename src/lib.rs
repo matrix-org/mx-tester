@@ -354,11 +354,7 @@ pub enum Status {
 }
 
 /// The version of Synapse to use by default.
-///
-/// As of this writing, more recent versions of Synapse suffer from
-/// https://github.com/matrix-org/synapse/issues/11385
-/// which makes them unusable with mx-tester.
-const DEFAULT_SYNAPSE_VERSION: &str = "matrixdotorg/synapse:v1.46.0";
+const DEFAULT_SYNAPSE_VERSION: &str = "matrixdotorg/synapse:latest";
 
 #[derive(Debug, Deserialize)]
 pub enum SynapseVersion {
@@ -492,7 +488,7 @@ async fn start_synapse_container(
 ) -> Result<(), Error> {
     let is_container_created = docker.is_container_created(container_name).await?;
 
-    let mut env = vec![
+    let env = vec![
         format!("SYNAPSE_SERVER_NAME={}", config.homeserver.server_name),
         "SYNAPSE_REPORT_STATS=no".into(),
         "SYNAPSE_CONFIG_DIR=/data".into(),
@@ -506,13 +502,6 @@ async fn start_synapse_container(
                 .guest
         ),
     ];
-    // Ensure that the config files and media can be deleted by the user
-    // who launched the program by giving synapse the same uid/gid.
-    #[cfg(unix)]
-    {
-        env.push(format!("UID={}", nix::unistd::getuid()));
-        env.push(format!("GID={}", nix::unistd::getegid()));
-    }
 
     if is_container_created {
         debug!("NO need to create container for {}", container_name);
@@ -581,6 +570,8 @@ async fn start_synapse_container(
                             .collect(),
                     ),
                     tty: Some(false),
+                    #[cfg(unix)]
+                    user: Some(format!("{}", nix::unistd::getuid())),
                     ..BollardContainerConfig::default()
                 },
             )
@@ -677,6 +668,8 @@ async fn start_synapse_container(
             CreateExecOptions::<Cow<'_, str>> {
                 cmd: Some(cmd.into_iter().map(|s| s.into()).collect()),
                 env: Some(env.into_iter().map(|s| s.into()).collect()),
+                #[cfg(unix)]
+                user: Some(format!("{}", nix::unistd::getuid()).into()),
                 ..CreateExecOptions::default()
             },
         )
