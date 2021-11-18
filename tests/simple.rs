@@ -8,16 +8,28 @@ lazy_static! {
         bollard::Docker::connect_with_local_defaults().expect("Failed to connect to Docker daemon");
 }
 
+/// The version of Synapse to use for testing.
+///
+/// As of this writing, more recent versions of Synapse suffer from
+/// https://github.com/matrix-org/synapse/issues/11385
+/// which makes them unusable with mx-tester.
+const SYNAPSE_VERSION: &str = "matrixdotorg/synapse:v1.46.0";
+
 /// Simple test: empty config.
 #[tokio::test]
 async fn test_simple() {
     let _ = env_logger::builder().is_test(true).try_init();
     let docker = DOCKER.clone();
-    let config = Config::builder().name("test-simple".into()).build();
+    let config = Config::builder()
+        .name("test-simple".into())
+        .synapse(SynapseVersion::Docker {
+            tag: SYNAPSE_VERSION.into(),
+        })
+        .build();
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
-    mx_tester::up(&docker, &SynapseVersion::ReleasedDockerImage, &config)
+    mx_tester::up(&docker, &config)
         .await
         .expect("Failed in step `up`");
     mx_tester::down(&docker, &config, Status::Manual)
@@ -48,6 +60,9 @@ async fn test_create_users() {
     // Use port 9998 to avoid colliding with test_simple.
     let config = Config::builder()
         .name("test-create-users".into())
+        .synapse(SynapseVersion::Docker {
+            tag: SYNAPSE_VERSION.into(),
+        })
         .users(vec![
             admin.clone(),
             regular_user.clone(),
@@ -72,7 +87,7 @@ async fn test_create_users() {
         .await
         .expect("Failed in step `build`");
     tokio::time::timeout(std::time::Duration::from_secs(180), async {
-        mx_tester::up(&docker, &SynapseVersion::ReleasedDockerImage, &config)
+        mx_tester::up(&docker, &config)
             .await
             .expect("Failed in step `up`")
     })

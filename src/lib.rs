@@ -320,7 +320,9 @@ impl Config {
     /// A tag for the Docker image we're creating/using.
     pub fn tag(&self) -> String {
         match self.synapse {
-            SynapseVersion::ReleasedDockerImage => format!("mx-tester-synapse-{}", self.name),
+            SynapseVersion::Docker { ref tag } => {
+                format!("mx-tester-synapse-{}-{}", tag, self.name)
+            }
         }
     }
 
@@ -351,17 +353,25 @@ pub enum Status {
     Manual,
 }
 
+/// The version of Synapse to use by default.
+///
+/// As of this writing, more recent versions of Synapse suffer from
+/// https://github.com/matrix-org/synapse/issues/11385
+/// which makes them unusable with mx-tester.
+const DEFAULT_SYNAPSE_VERSION: &str = "matrixdotorg/synapse:v1.46.0";
+
 #[derive(Debug, Deserialize)]
 pub enum SynapseVersion {
-    #[serde(rename = "matrixdotorg/synapse:latest")]
-    /// The latest version of Synapse released on https://hub.docker.com/r/matrixdotorg/synapse/
-    ReleasedDockerImage,
+    #[serde(rename = "docker")]
+    Docker { tag: String },
     // FIXME: Allow using a version of Synapse that lives in a local directory
     // (this will be sufficient to also implement pulling from github develop)
 }
 impl Default for SynapseVersion {
     fn default() -> Self {
-        Self::ReleasedDockerImage
+        Self::Docker {
+            tag: DEFAULT_SYNAPSE_VERSION.to_string(),
+        }
     }
 }
 
@@ -710,7 +720,9 @@ async fn start_synapse_container(
 /// Rebuild the Synapse image with modules.
 pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
-    let SynapseVersion::ReleasedDockerImage = config.synapse;
+    let SynapseVersion::Docker {
+        tag: ref docker_tag,
+    } = config.synapse;
     let setup_container_name = config.setup_container_name();
     let run_container_name = config.run_container_name();
 
@@ -746,7 +758,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     let dockerfile_content = format!("
 # A custom Dockerfile to rebuild synapse from the official release + plugins
 
-FROM matrixdotorg/synapse:latest
+FROM {docker_tag}
 
 # We need gcc to build pyahocorasick
 RUN apt-get update --quiet && apt-get install gcc --yes --quiet
@@ -764,6 +776,7 @@ ENTRYPOINT []
 ENV SYNAPSE_HTTP_PORT=8008
 EXPOSE 8008/tcp 8009/tcp 8448/tcp
 ",
+    docker_tag = docker_tag,
     copy = config.modules.iter()
         // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
         .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
@@ -828,9 +841,9 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
 }
 
 /// Bring things up. Returns any environment variables to pass to the run script.
-pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> Result<(), Error> {
+pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
-    let SynapseVersion::ReleasedDockerImage = *version;
+    let SynapseVersion::Docker { .. } = config.synapse;
     let setup_container_name = config.setup_container_name();
     let run_container_name = config.run_container_name();
 
@@ -931,7 +944,7 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
 /// Bring things down.
 pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
-    let SynapseVersion::ReleasedDockerImage = config.synapse;
+    let SynapseVersion::Docker { .. } = config.synapse;
     let run_container_name = config.run_container_name();
 
     if let Some(ref down_script) = config.down {

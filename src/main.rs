@@ -74,10 +74,6 @@ async fn main() {
     // Now run the scripts.
     // We stop immediately if `build` or `up` fails but if `run` fails,
     // we may need to run some cleanup before stopping.
-    //
-    // FIXME: Is this the safest/least astonishing way of doing it?
-
-    let synapse_version = SynapseVersion::ReleasedDockerImage;
 
     if commands.is_empty() {
         // No need to initialize Docker.
@@ -99,9 +95,7 @@ async fn main() {
             }
             Command::Up => {
                 info!("mx-tester up...");
-                up(&docker, &synapse_version, &config)
-                    .await
-                    .expect("Error in `up`");
+                up(&docker, &config).await.expect("Error in `up`");
             }
             Command::Run => {
                 info!("mx-tester run...");
