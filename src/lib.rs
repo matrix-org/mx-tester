@@ -172,7 +172,7 @@ pub struct Config {
     #[serde(default)]
     #[builder(default)]
     /// A script to run at the end of the setup phase.
-    pub up: Option<Script>,
+    pub up: Option<UpScript>,
 
     #[serde(default)]
     #[builder(default)]
@@ -427,6 +427,32 @@ pub struct ModuleConfig {
     config: serde_yaml::Value,
 }
 
+/// A script for `up`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum UpScript {
+    /// If `up` and/or `down` are specified, take them into account.
+    FullUpScript(FullUpScript),
+
+    /// Otherwise, it's a simple script.
+    SimpleScript(Script),
+}
+impl Default for UpScript {
+    fn default() -> Self {
+        UpScript::FullUpScript(FullUpScript::default())
+    }
+}
+
+/// A script for `up`.
+#[derive(Debug, Deserialize, Default)]
+pub struct FullUpScript {
+    /// Code to run before bringing up the image.
+    before: Option<Script>,
+
+    /// Code to run after bringing up the image.
+    after: Option<Script>,
+}
+
 /// A script for `down`.
 #[derive(Debug, Deserialize)]
 pub struct DownScript {
@@ -455,33 +481,33 @@ async fn start_synapse_container(
     detach: bool,
 ) -> Result<(), Error> {
     let is_container_created = docker.is_container_created(container_name).await?;
+
+    let mut env = vec![
+        format!("SYNAPSE_SERVER_NAME={}", config.homeserver.server_name),
+        "SYNAPSE_REPORT_STATS=no".into(),
+        "SYNAPSE_CONFIG_DIR=/data".into(),
+        format!(
+            "SYNAPSE_HTTP_PORT={}",
+            config
+                .docker
+                .port_mapping
+                .get(0)
+                .ok_or_else(|| anyhow!("In mx-tester.yml, an empty port mapping was specified"))?
+                .guest
+        ),
+    ];
+    // Ensure that the config files and media can be deleted by the user
+    // who launched the program by giving synapse the same uid/gid.
+    #[cfg(unix)]
+    {
+        env.push(format!("UID={}", nix::unistd::getuid()));
+        env.push(format!("GID={}", nix::unistd::getegid()));
+    }
+
     if is_container_created {
         debug!("NO need to create container for {}", container_name);
     } else {
         debug!("We need to create container for {}", container_name);
-        let mut env = vec![
-            format!("SYNAPSE_SERVER_NAME={}", config.homeserver.server_name),
-            "SYNAPSE_REPORT_STATS=no".into(),
-            "SYNAPSE_CONFIG_DIR=/data".into(),
-            format!(
-                "SYNAPSE_HTTP_PORT={}",
-                config
-                    .docker
-                    .port_mapping
-                    .get(0)
-                    .ok_or_else(|| anyhow!(
-                        "In mx-tester.yml, an empty port mapping was specified"
-                    ))?
-                    .guest
-            ),
-        ];
-        // Ensure that the config files and media can be deleted by the user
-        // who launched the program by giving synapse the same uid/gid.
-        #[cfg(unix)]
-        {
-            env.push(format!("UID={}", nix::unistd::getuid()));
-            env.push(format!("GID={}", nix::unistd::getegid()));
-        }
 
         // Generate configuration to open and map ports.
         let host_port_bindings = config
@@ -513,7 +539,7 @@ async fn start_synapse_container(
                     name: container_name,
                 }),
                 BollardContainerConfig {
-                    env: Some(env),
+                    env: Some(env.clone()),
                     exposed_ports: Some(exposed_ports),
                     hostname: Some(config.docker.hostname.clone()),
                     host_config: Some(HostConfig {
@@ -640,6 +666,7 @@ async fn start_synapse_container(
             container_name,
             CreateExecOptions::<Cow<'_, str>> {
                 cmd: Some(cmd.into_iter().map(|s| s.into()).collect()),
+                env: Some(env.into_iter().map(|s| s.into()).collect()),
                 ..CreateExecOptions::default()
             },
         )
@@ -807,6 +834,20 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
     let setup_container_name = config.setup_container_name();
     let run_container_name = config.run_container_name();
 
+    match config.up {
+        Some(UpScript::FullUpScript(FullUpScript {
+            before: Some(ref script),
+            ..
+        }))
+        | Some(UpScript::SimpleScript(ref script)) => {
+            let env = config.shared_env_variables()?;
+            script
+                .run(&env)
+                .context("Error running `up` script (before)")?;
+        }
+        _ => {}
+    }
+
     // Create the network if necessary.
     // We'll add the container once it's available.
     let network_name = config.network();
@@ -817,6 +858,10 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
                 ..CreateNetworkOptions::default()
             })
             .await?;
+        assert!(
+            docker.is_network_up(&network_name).await?,
+            "The network should now be up"
+        );
     }
 
     // Create the synapse data directory.
@@ -825,7 +870,8 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
     std::fs::create_dir_all(&synapse_data_directory)
         .with_context(|| format!("Cannot create directory {:?}", synapse_data_directory))?;
     // Cleanup leftovers.
-    let _ = std::fs::remove_file(synapse_data_directory.join("homeserver.yaml"));
+    let homeserver_path = synapse_data_directory.join("homeserver.yaml");
+    let _ = std::fs::remove_file(&homeserver_path);
 
     // Start a container to generate homeserver.yaml.
     start_synapse_container(
@@ -869,9 +915,15 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
     handle_user_registration(config)
         .await
         .context("Failed to setup users")?;
-    if let Some(ref script) = config.up {
+    if let Some(UpScript::FullUpScript(FullUpScript {
+        after: Some(ref script),
+        ..
+    })) = config.up
+    {
         let env = config.shared_env_variables()?;
-        script.run(&env).context("Error running `up` script")?;
+        script
+            .run(&env)
+            .context("Error running `up` script (after)")?;
     }
     Ok(())
 }
