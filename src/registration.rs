@@ -286,6 +286,7 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
                 user.localname
             )
         })?;
+        let joined_rooms = client.joined_rooms();
         for room in &user.rooms {
             let mut request = matrix_sdk::ruma::api::client::r0::room::create_room::Request::new();
             if room.public {
@@ -302,6 +303,12 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
             }
             if let Some(ref alias) = room.alias {
                 request.room_alias_name = Some(alias.as_ref());
+                if joined_rooms.iter().any(|joined| {
+                    matches!(joined.canonical_alias(), Some(joined_alias) if joined_alias.as_str() == alias)
+                }) {
+                    // Don't re-register the room.
+                    continue;
+                }
             }
             if let Some(ref topic) = room.topic {
                 request.topic = Some(topic.as_ref());

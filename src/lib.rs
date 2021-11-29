@@ -172,7 +172,7 @@ pub struct Config {
     #[serde(default)]
     #[builder(default)]
     /// A script to run at the end of the setup phase.
-    pub up: Option<Script>,
+    pub up: Option<UpScript>,
 
     #[serde(default)]
     #[builder(default)]
@@ -283,7 +283,7 @@ impl Config {
         if !combined_config.contains_key(&modules_key)
             || combined_config.get(&modules_key).unwrap().is_null()
         {
-            combined_config.insert(modules_key.clone(), YAML::Sequence(vec![].into()));
+            combined_config.insert(modules_key.clone(), YAML::Sequence(vec![]));
         }
         let modules_root = combined_config
             .get_mut(&modules_key)
@@ -320,7 +320,9 @@ impl Config {
     /// A tag for the Docker image we're creating/using.
     pub fn tag(&self) -> String {
         match self.synapse {
-            SynapseVersion::ReleasedDockerImage => format!("mx-tester-synapse-{}", self.name),
+            SynapseVersion::Docker { ref tag } => {
+                format!("mx-tester-synapse-{}-{}", tag, self.name)
+            }
         }
     }
 
@@ -351,17 +353,21 @@ pub enum Status {
     Manual,
 }
 
+/// The version of Synapse to use by default.
+const DEFAULT_SYNAPSE_VERSION: &str = "matrixdotorg/synapse:latest";
+
 #[derive(Debug, Deserialize)]
 pub enum SynapseVersion {
-    #[serde(rename = "matrixdotorg/synapse:latest")]
-    /// The latest version of Synapse released on https://hub.docker.com/r/matrixdotorg/synapse/
-    ReleasedDockerImage,
+    #[serde(rename = "docker")]
+    Docker { tag: String },
     // FIXME: Allow using a version of Synapse that lives in a local directory
     // (this will be sufficient to also implement pulling from github develop)
 }
 impl Default for SynapseVersion {
     fn default() -> Self {
-        Self::ReleasedDockerImage
+        Self::Docker {
+            tag: DEFAULT_SYNAPSE_VERSION.to_string(),
+        }
     }
 }
 
@@ -427,6 +433,32 @@ pub struct ModuleConfig {
     config: serde_yaml::Value,
 }
 
+/// A script for `up`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum UpScript {
+    /// If `up` and/or `down` are specified, take them into account.
+    FullUpScript(FullUpScript),
+
+    /// Otherwise, it's a simple script.
+    SimpleScript(Script),
+}
+impl Default for UpScript {
+    fn default() -> Self {
+        UpScript::FullUpScript(FullUpScript::default())
+    }
+}
+
+/// A script for `up`.
+#[derive(Debug, Deserialize, Default)]
+pub struct FullUpScript {
+    /// Code to run before bringing up the image.
+    before: Option<Script>,
+
+    /// Code to run after bringing up the image.
+    after: Option<Script>,
+}
+
 /// A script for `down`.
 #[derive(Debug, Deserialize)]
 pub struct DownScript {
@@ -455,33 +487,26 @@ async fn start_synapse_container(
     detach: bool,
 ) -> Result<(), Error> {
     let is_container_created = docker.is_container_created(container_name).await?;
+
+    let env = vec![
+        format!("SYNAPSE_SERVER_NAME={}", config.homeserver.server_name),
+        "SYNAPSE_REPORT_STATS=no".into(),
+        "SYNAPSE_CONFIG_DIR=/data".into(),
+        format!(
+            "SYNAPSE_HTTP_PORT={}",
+            config
+                .docker
+                .port_mapping
+                .get(0)
+                .ok_or_else(|| anyhow!("In mx-tester.yml, an empty port mapping was specified"))?
+                .guest
+        ),
+    ];
+
     if is_container_created {
         debug!("NO need to create container for {}", container_name);
     } else {
         debug!("We need to create container for {}", container_name);
-        let mut env = vec![
-            format!("SYNAPSE_SERVER_NAME={}", config.homeserver.server_name),
-            "SYNAPSE_REPORT_STATS=no".into(),
-            "SYNAPSE_CONFIG_DIR=/data".into(),
-            format!(
-                "SYNAPSE_HTTP_PORT={}",
-                config
-                    .docker
-                    .port_mapping
-                    .get(0)
-                    .ok_or_else(|| anyhow!(
-                        "In mx-tester.yml, an empty port mapping was specified"
-                    ))?
-                    .guest
-            ),
-        ];
-        // Ensure that the config files and media can be deleted by the user
-        // who launched the program by giving synapse the same uid/gid.
-        #[cfg(unix)]
-        {
-            env.push(format!("UID={}", nix::unistd::getuid()));
-            env.push(format!("GID={}", nix::unistd::getegid()));
-        }
 
         // Generate configuration to open and map ports.
         let host_port_bindings = config
@@ -513,7 +538,7 @@ async fn start_synapse_container(
                     name: container_name,
                 }),
                 BollardContainerConfig {
-                    env: Some(env),
+                    env: Some(env.clone()),
                     exposed_ports: Some(exposed_ports),
                     hostname: Some(config.docker.hostname.clone()),
                     host_config: Some(HostConfig {
@@ -545,6 +570,8 @@ async fn start_synapse_container(
                             .collect(),
                     ),
                     tty: Some(false),
+                    #[cfg(unix)]
+                    user: Some(format!("{}", nix::unistd::getuid())),
                     ..BollardContainerConfig::default()
                 },
             )
@@ -640,6 +667,9 @@ async fn start_synapse_container(
             container_name,
             CreateExecOptions::<Cow<'_, str>> {
                 cmd: Some(cmd.into_iter().map(|s| s.into()).collect()),
+                env: Some(env.into_iter().map(|s| s.into()).collect()),
+                #[cfg(unix)]
+                user: Some(format!("{}", nix::unistd::getuid()).into()),
                 ..CreateExecOptions::default()
             },
         )
@@ -683,7 +713,9 @@ async fn start_synapse_container(
 /// Rebuild the Synapse image with modules.
 pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
-    let SynapseVersion::ReleasedDockerImage = config.synapse;
+    let SynapseVersion::Docker {
+        tag: ref docker_tag,
+    } = config.synapse;
     let setup_container_name = config.setup_container_name();
     let run_container_name = config.run_container_name();
 
@@ -719,7 +751,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     let dockerfile_content = format!("
 # A custom Dockerfile to rebuild synapse from the official release + plugins
 
-FROM matrixdotorg/synapse:latest
+FROM {docker_tag}
 
 # We need gcc to build pyahocorasick
 RUN apt-get update --quiet && apt-get install gcc --yes --quiet
@@ -737,15 +769,13 @@ ENTRYPOINT []
 ENV SYNAPSE_HTTP_PORT=8008
 EXPOSE 8008/tcp 8009/tcp 8448/tcp
 ",
+    docker_tag = docker_tag,
     copy = config.modules.iter()
         // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
         .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
         .format("\n"),
     setup = config.modules.iter()
-        .filter_map(|module| match module.install {
-            None => None,
-            Some(ref script) => Some(format!("## Install {}\n{}\n", module.name, script.lines.iter().map(|line| format!("RUN {}", line)).format("\n")))
-        })
+        .filter_map(|module| module.install.as_ref().map(|script| format!("## Install {}\n{}\n", module.name, script.lines.iter().map(|line| format!("RUN {}", line)).format("\n"))))
         .format("\n")
 );
     debug!("dockerfile {}", dockerfile_content);
@@ -804,11 +834,25 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
 }
 
 /// Bring things up. Returns any environment variables to pass to the run script.
-pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> Result<(), Error> {
+pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
-    let SynapseVersion::ReleasedDockerImage = *version;
+    let SynapseVersion::Docker { .. } = config.synapse;
     let setup_container_name = config.setup_container_name();
     let run_container_name = config.run_container_name();
+
+    match config.up {
+        Some(UpScript::FullUpScript(FullUpScript {
+            before: Some(ref script),
+            ..
+        }))
+        | Some(UpScript::SimpleScript(ref script)) => {
+            let env = config.shared_env_variables()?;
+            script
+                .run(&env)
+                .context("Error running `up` script (before)")?;
+        }
+        _ => {}
+    }
 
     // Create the network if necessary.
     // We'll add the container once it's available.
@@ -820,6 +864,10 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
                 ..CreateNetworkOptions::default()
             })
             .await?;
+        assert!(
+            docker.is_network_up(&network_name).await?,
+            "The network should now be up"
+        );
     }
 
     // Create the synapse data directory.
@@ -828,7 +876,8 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
     std::fs::create_dir_all(&synapse_data_directory)
         .with_context(|| format!("Cannot create directory {:?}", synapse_data_directory))?;
     // Cleanup leftovers.
-    let _ = std::fs::remove_file(synapse_data_directory.join("homeserver.yaml"));
+    let homeserver_path = synapse_data_directory.join("homeserver.yaml");
+    let _ = std::fs::remove_file(&homeserver_path);
 
     // Start a container to generate homeserver.yaml.
     start_synapse_container(
@@ -869,12 +918,18 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
     .context("Failed to start Synapse")?;
 
     debug!("Synapse is now launched");
-    handle_user_registration(&config)
+    handle_user_registration(config)
         .await
         .context("Failed to setup users")?;
-    if let Some(ref script) = config.up {
+    if let Some(UpScript::FullUpScript(FullUpScript {
+        after: Some(ref script),
+        ..
+    })) = config.up
+    {
         let env = config.shared_env_variables()?;
-        script.run(&env).context("Error running `up` script")?;
+        script
+            .run(&env)
+            .context("Error running `up` script (after)")?;
     }
     Ok(())
 }
@@ -882,7 +937,7 @@ pub async fn up(docker: &Docker, version: &SynapseVersion, config: &Config) -> R
 /// Bring things down.
 pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
-    let SynapseVersion::ReleasedDockerImage = config.synapse;
+    let SynapseVersion::Docker { .. } = config.synapse;
     let run_container_name = config.run_container_name();
 
     if let Some(ref down_script) = config.down {
