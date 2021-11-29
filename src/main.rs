@@ -44,6 +44,26 @@ async fn main() {
                 .possible_values(&["up", "run", "down", "build"])
                 .help("The list of commands to run. Order matters and the same command may be repeated."),
         )
+        .arg(
+            Arg::with_name("username")
+                .short("u")
+                .long("username")
+                .required(false)
+                .help("A username for logging to the Docker registry")
+        )
+        .arg(
+            Arg::with_name("password")
+                .short("p")
+                .long("password")
+                .required(false)
+                .help("A password for logging to the Docker registry")
+        )
+        .arg(
+            Arg::with_name("server")
+                .long("server")
+                .required(false)
+                .help("A server name for the Docker registry")
+        )
         .get_matches();
 
     let config_path = matches
@@ -52,7 +72,7 @@ async fn main() {
     let config_file = std::fs::File::open(config_path)
         .unwrap_or_else(|err| panic!("Could not open config file `{}`: {}", config_path, err));
 
-    let config: Config = serde_yaml::from_reader(config_file)
+    let mut config: Config = serde_yaml::from_reader(config_file)
         .unwrap_or_else(|err| panic!("Invalid config file `{}`: {}", config_path, err));
     debug!("Config: {:2?}", config);
 
@@ -70,6 +90,16 @@ async fn main() {
     };
     debug!("Running {:?}", commands);
     debug!("Root: {:?}", config.test_root());
+
+    if let Some(server) = matches.value_of("server") {
+        config.credentials.serveraddress = Some(server.to_string());
+    }
+    if let Some(password) = matches.value_of("password") {
+        config.credentials.password = Some(password.to_string());
+    }
+    if let Some(username) = matches.value_of("username") {
+        config.credentials.username = Some(username.to_string());
+    }
 
     // Now run the scripts.
     // We stop immediately if `build` or `up` fails but if `run` fails,

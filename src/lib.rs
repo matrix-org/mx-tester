@@ -26,6 +26,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Error};
 use bollard::{
+    auth::DockerCredentials,
     container::{
         Config as BollardContainerConfig, CreateContainerOptions, ListContainersOptions,
         LogsOptions, StartContainerOptions, WaitContainerOptions,
@@ -198,6 +199,11 @@ pub struct Config {
     #[builder(default)]
     /// The version of Synapse to use
     pub synapse: SynapseVersion,
+
+    #[serde(default)]
+    #[builder(default)]
+    /// Information for logging to a registry.
+    pub credentials: DockerCredentials,
 }
 
 impl Config {
@@ -808,7 +814,11 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
                 rm: true,
                 ..Default::default()
             },
-            None,
+            config.credentials.serveraddress.as_ref().map(|server| {
+                let mut credentials = HashMap::new();
+                credentials.insert(server.clone(), config.credentials.clone());
+                credentials
+            }),
             Some(body),
         );
         while let Some(result) = stream.next().await {
