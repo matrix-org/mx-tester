@@ -34,7 +34,7 @@ use bollard::{
     exec::{CreateExecOptions, StartExecOptions},
     models::{EndpointSettings, HostConfig, HostConfigLogConfig, PortBinding},
     network::{ConnectNetworkOptions, CreateNetworkOptions, ListNetworksOptions},
-    Docker
+    Docker,
 };
 use futures_util::stream::StreamExt;
 use itertools::Itertools;
@@ -562,7 +562,12 @@ async fn start_synapse_container(
             .collect();
         debug!("port_bindings: {:#?}", host_port_bindings);
 
-        debug!("containers: {:#?}", docker.list_containers(None::<ListContainersOptions<String>>).await?);
+        debug!(
+            "containers: {:#?}",
+            docker
+                .list_containers(None::<ListContainersOptions<String>>)
+                .await?
+        );
         assert!(std::fs::metadata(data_dir).is_ok());
 
         debug!("Creating container {}", container_name);
@@ -919,7 +924,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     let synapse_data_directory = config.synapse_root().join("data");
     std::fs::create_dir_all(&synapse_data_directory)
         .with_context(|| format!("Cannot create directory {:#?}", synapse_data_directory))?;
-    
+
     // Cleanup leftovers.
     let homeserver_path = synapse_data_directory.join("homeserver.yaml");
     let _ = std::fs::remove_file(&homeserver_path);
