@@ -204,12 +204,14 @@ pub struct Config {
     #[builder(default)]
     /// Information for logging to a registry.
     ///
-    /// Maybe overridden from the command-line.
+    /// May be overridden from the command-line.
     pub credentials: DockerCredentials,
 
     #[serde(default)]
     #[builder(default)]
     /// Directories to use for the test.
+    ///
+    /// May be overridden from the command-line.
     pub directories: Directories,
 }
 
