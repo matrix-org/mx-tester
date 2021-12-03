@@ -68,6 +68,13 @@ async fn main() {
                 .required(false)
                 .help("A server name for the Docker registry")
         )
+        .arg(
+            Arg::with_name("root_dir")
+                .long("root")
+                .takes_value(true)
+                .required(false)
+                .help("Write all files in subdirectories of this directory (default: /tmp)")
+        )
         .get_matches();
 
     let config_path = matches
@@ -103,6 +110,9 @@ async fn main() {
     }
     if let Some(username) = matches.value_of("username") {
         config.credentials.username = Some(username.to_string());
+    }
+    if let Some(root) = matches.value_of("root_dir") {
+        config.directories.root = std::path::Path::new(root).to_path_buf()
     }
 
     // Now run the scripts.
