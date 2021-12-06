@@ -912,6 +912,9 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         debug!("Network {} already exists", network_name);
     }
 
+    // Only execute the `up` script once the network is up,
+    // in case we want to e.g. bring up images that need
+    // that same network.
     match config.up {
         Some(UpScript::FullUpScript(FullUpScript {
             before: Some(ref script),
