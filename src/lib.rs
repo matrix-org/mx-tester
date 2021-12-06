@@ -124,11 +124,13 @@ impl DockerConfig {
 #[derive(Debug, Deserialize, Serialize, TypedBuilder)]
 pub struct HomeserverConfig {
     /// The name of the homeserver.
-    #[builder(default = "localhost:9999".to_string())]
+    #[serde(default = "HomeserverConfig::server_name_default")]
+    #[builder(default = HomeserverConfig::server_name_default())]
     pub server_name: String,
 
     /// The URL to communicate to the server with.
-    #[builder(default = "http://localhost:9999".to_string())]
+    #[serde(default = "HomeserverConfig::public_baseurl_default")]
+    #[builder(default = HomeserverConfig::public_baseurl_default())]
     pub public_baseurl: String,
 
     #[serde(default = "HomeserverConfig::registration_shared_secret_default")]
@@ -149,6 +151,12 @@ impl Default for HomeserverConfig {
 }
 
 impl HomeserverConfig {
+    pub fn server_name_default() -> String {
+        "localhost:9999".to_string()
+    }
+    pub fn public_baseurl_default() -> String {
+        format!("http://{}", Self::server_name_default())
+    }
     pub fn registration_shared_secret_default() -> String {
         "MX_TESTER_REGISTRATION_DEFAULT".to_string()
     }
@@ -364,7 +372,7 @@ pub struct Directories {
     ///
     /// All temporary files and logs are created as subdirectories of this directory.
     ///
-    /// If unspecified, `$TMPDIR/mx-tester` (or the platform equivalent).
+    /// If unspecified, `mx-tester` in the platform's temporary directory.
     #[builder(default=std::env::temp_dir().join("mx-tester"))]
     pub root: PathBuf,
 }
