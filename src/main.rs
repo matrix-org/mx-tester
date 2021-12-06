@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use anyhow::Context;
 use log::*;
 use mx_tester::*;
 
@@ -44,6 +45,36 @@ async fn main() {
                 .possible_values(&["up", "run", "down", "build"])
                 .help("The list of commands to run. Order matters and the same command may be repeated."),
         )
+        .arg(
+            Arg::with_name("username")
+                .short("u")
+                .long("username")
+                .takes_value(true)
+                .required(false)
+                .help("A username for logging to the Docker registry")
+        )
+        .arg(
+            Arg::with_name("password")
+                .short("p")
+                .long("password")
+                .takes_value(true)
+                .required(false)
+                .help("A password for logging to the Docker registry")
+        )
+        .arg(
+            Arg::with_name("server")
+                .long("server")
+                .takes_value(true)
+                .required(false)
+                .help("A server name for the Docker registry")
+        )
+        .arg(
+            Arg::with_name("root_dir")
+                .long("root")
+                .takes_value(true)
+                .required(false)
+                .help("Write all files in subdirectories of this directory (default: /tmp)")
+        )
         .get_matches();
 
     let config_path = matches
@@ -52,7 +83,7 @@ async fn main() {
     let config_file = std::fs::File::open(config_path)
         .unwrap_or_else(|err| panic!("Could not open config file `{}`: {}", config_path, err));
 
-    let config: Config = serde_yaml::from_reader(config_file)
+    let mut config: Config = serde_yaml::from_reader(config_file)
         .unwrap_or_else(|err| panic!("Invalid config file `{}`: {}", config_path, err));
     debug!("Config: {:2?}", config);
 
@@ -71,6 +102,19 @@ async fn main() {
     debug!("Running {:?}", commands);
     debug!("Root: {:?}", config.test_root());
 
+    if let Some(server) = matches.value_of("server") {
+        config.credentials.serveraddress = Some(server.to_string());
+    }
+    if let Some(password) = matches.value_of("password") {
+        config.credentials.password = Some(password.to_string());
+    }
+    if let Some(username) = matches.value_of("username") {
+        config.credentials.username = Some(username.to_string());
+    }
+    if let Some(root) = matches.value_of("root_dir") {
+        config.directories.root = std::path::Path::new(root).to_path_buf()
+    }
+
     // Now run the scripts.
     // We stop immediately if `build` or `up` fails but if `run` fails,
     // we may need to run some cleanup before stopping.
@@ -80,8 +124,17 @@ async fn main() {
         return;
     }
 
-    let docker = bollard::Docker::connect_with_local_defaults()
-        .expect("Failed to connect to the Docker daemon");
+    let docker = if let Some(ref server) = config.credentials.serveraddress {
+        // If we have provided a server, well, let's use it.
+        // This is mainly useful for running in CI.
+        info!("Using docker repository {}", server);
+        bollard::Docker::connect_with_http_defaults().context("Connecting with http defaults")
+    } else {
+        // Otherwise, use the local defaults.
+        info!("Using local docker repository");
+        bollard::Docker::connect_with_local_defaults().context("Connecting with local defaults")
+    }
+    .expect("Failed to connect to the Docker daemon");
 
     // Store the results of a `run` command in case it's followed by
     // a `down` command, which needs to decide between a success path

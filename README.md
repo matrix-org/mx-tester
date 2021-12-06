@@ -34,16 +34,103 @@ It has the following structure:
 
 ```yaml
 name: A name for this test suite
-homeserver_config:
-  # A yaml subtree specifying configuration options for Synapse.
-  #
-  # This uses the exact same syntax as homeserver.yaml.
-  #
-  # If you make use of modules, it MUST contain an entry `modules`,
-  # as per https://github.com/matrix-org/synapse/blob/develop/docs/modules.md
+
+# --- Configuring external components
+
+up:
+  # Optional. A script to be executed to prepare additional components
+  # as part of `mx-tester up`.
+  before:
+    - # Optional. Script to be executed before bringinng up the image.
+    - # Use this script e.g. to setup databases, etc.
+  after:
+    - # Optional. Script to be executed after bringing up the image.
+    - # Use this script e.g. to setup bots.
+
+down:
+  # Optional. A script to be executed to clean up the environment,
+  # typically to teardown components that were setup with `up`. This
+  # script will be executed at the end of `mx-tester down`.
+  success:
+    - # Optional. A script to be executed only if `run` was a success.
+    - # This script will ONLY be executed if `mx-tester` is called to
+    - # execute both run and down, e.g. `mx-tester up run down`.
+  failure:
+    - # Optional. A script to be executed only if `run` was a failure.
+    - # This script will ONLY be executed if `mx-tester` is called to
+    - # execute both run and down, e.g. `mx-tester up run down`.
+  finally:
+    - # Optional. A script to be executed regardless of the result of `run`.
+    - # This script will ALWAYS be executed if `mx-tester down` is called.
+
+directories:
+  # Optional. Directories to use for the test.
+  root:
+    # Optional. The root directory for this test.
+    # All temporary files and logs are created as subdirectories of this directory.
+    # Default: `mx-tester` in the platform's temporary directory.
+    # May be overridden from the command-line with parameter `--root`.
+    #
+    # IMPORTANT: Some CI environments (e.g. Docker-in-docker aka dind) do not play
+    # well with the platform's temporary directory. If you are running `mx-tester`
+    # in such an environment, you should probably specify your root directory to
+    # be in your (environment-specific) home-style directory (which may be your
+    # build directory, etc.).
+    #
+    # Example: On GitLab CI, you should probably use `/builds/$CI_PROJECT_PATH`.
+
+# --- Configuring the test
+
+run:
+  - # Optional. A script to be executed as `mx-tester run`.
+  - # Use this e.g. to launch integration tests.
+
+users:
+  - # Optional. A list of users to create for the test.
+  - # These users are created during `mx-tester up`.
+  - # If the users already exist, they are not recreated.
+  - localname:
+    # Required. A name for the user.
+    admin:
+    # Optional. If `true`, the users should be an admin for the server.
+    # Default: `false`.
+    password:
+    # Optional. If specified, a password for the user.
+    # Default: "password".
+    rooms:
+    - # Optional. A list of rooms to create.
+    - public:
+      # Optional. If `true`, the room should be public.
+      # Default: `false`.
+      name:
+      # Optional. A name for the room.
+      # Default: No name.
+      alias:
+      # Optional. An alias for the room.
+      # Default: No alias.
+      topic:
+      # Optional. A topic for the room.
+      # Default: No topic.
+      members:
+      # Optional. A list of users (created by `users`) to invite to the room.
+      # mx-tester will ensure that these users join the room.
+      # Default: No invites.
+
+# --- Configuring the homeserver
+
+synapse:
+  # Optionally, a version of Synapse.
+  # If unspecified, pick the latest version available on Docker Hub.
+  docker:
+    # Required: A docker tag, e.g. "matrixdotorg/synapse:latest"
+
 modules:
+  # Optionally, a list of modules to install.
   - name: Name of a module you wish to setup
-    build: # A script to setup the module.
+    build:
+      # Required: A script to setup the module.
+      # This may be as simple as copying the module from its directory
+      # to $MX_TEST_MODULE_DIR.
       - # This script MUST copy the source code of the module
       - # to directory $MX_TEST_MODULE_DIR
       - # ...
@@ -52,24 +139,66 @@ modules:
       - # env: MX_TEST_SCRIPT_TMPDIR -- a temporary directory where the test can
       - #   write data. Note that `mx-tester` will NOT clear this directory.
       - # env: MX_TEST_CWD -- the directory in which the test was launched.
+    install:
+      # Optional. A script to install dependencies.
+      # Typically, this will be something along the lines of
+      # `pypi -r module_name/requirements.txt`
+    config:
+      # Required. Additional configuration information
+      # to copy into homeserver.yaml.
+      # This typically looks like
+      # module: python_module_name
+      # config:
+      #   key: value
+      #   key: value
+      #   ...
   - # Other modules, if necessary.
-up: # Optionally, a script to be executed at the end of `mx-tester up`
-  - # Use this script e.g. to setup additional components, such as bots.
-  -
-  - # env: MX_TEST_SCRIPT_TMPDIR -- a temporary directory where the test can
-  - #   write data. Note that `mx-tester` will NOT clear this directory.
-  - # env: MX_TEST_CWD -- the directory in which the test was launched.
-run: # Optionally, a script to be executed as `mx-tester run`
-  - # Use this script e.g. to start your tests.
-  - # env: MX_TEST_SCRIPT_TMPDIR -- a temporary directory where the test can
-  - #   write data. Note that `mx-tester` will NOT clear this directory.
-  - # env: MX_TEST_CWD -- the directory in which the test was launched.
-down: # Optionally, a script to be executed at the start of `mx-tester down`
-      # Use this script e.g. to teardown additional components, such as bots.
-    success: # Optionally, a script to be executed if `run` was a success. -- NOT IMPLEMENTED YET
-    failure: # Optionally, a script to be executed if `run` was a failure. -- NOT IMPLEMENTED YET
-    finally: # Optionally, a script to be executed regardless of the result of `run`.
-      - # env: MX_TEST_SCRIPT_TMPDIR -- a temporary directory where the test can
-      - #   write data. Note that `mx-tester` will NOT clear this directory.
-      - # env: MX_TEST_CWD -- the directory in which the test was launched.
+
+homeserver:
+  # Optional. Additional configuration for the homeserver.
+  # Each of these fields will be copied into homeserver.yaml.
+  # For more detail on the fields, see the documentation for homeserver.yaml.
+  server_name:
+    # Optional. The name of a homeserver.
+    # By default, `localhost:9999`.
+  public_baseurl:
+    # Optional. The URL to communicate to the server with.
+    # By default, `http://localhost:9999`.
+  registration_shared_secret:
+    # Optional. The registration shared secret.
+    # By default, "MX_TESTER_REGISTRATION_DEFAULT".
+  ...
+    # Any other field to be copied in homeserver.yaml.
+
+# --- Docker configuration
+
+docker:
+  # Optional. Additional configuration for Docker.
+  hostname:
+    # Optional. The hostname to give to the Synapse container on the docker
+    # network.
+    # By default, "synapse".
+  port_mapping:
+    - # Optional. The docker port mapping configuration to use for the
+    - # synapse container.
+    - # By default:
+    - # - host: 9999
+    - # - guest: 8008
+
+credentials:
+  # Optional. Credentials to connect to a Docker registry,
+  # as per `docker login`.
+  # Typically useful to adapt mx-tester to your CI.
+  username:
+  # Optional. Specify a username to connect to the registry.
+  # Default: No username.
+  # May be overridden from the command-line with parameter `--username`/`-u`.
+  password:
+  # Optional. Specify a password to connect to the registry.
+  # Default: No password.
+  # May be overridden from the command-line with parameter `--password`/`-p`.
+  serveraddress:
+  # Optional. Specify a server to connect to the registry.
+  # Default: No server.
+  # May be overridden from the command-line with parameter `--server`.
 ```
