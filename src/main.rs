@@ -163,11 +163,15 @@ async fn main() {
                 };
                 let result_down = down(&docker, &config, status).await;
                 if let Some(result_run) = result_run {
-                    result_run.expect("Error in `up`");
+                    result_run.expect("Error in `run`");
                 }
                 result_run = None;
                 result_down.expect("Error during teardown");
             }
         }
+    }
+    if let Some(result) = result_run {
+        // We haven't consumed the result of run().
+        result.expect("Error in `run`");
     }
 }
