@@ -162,10 +162,10 @@ async fn main() {
                     Some(Err(_)) => Status::Failure,
                 };
                 let result_down = down(&docker, &config, status).await;
-                if let Some(result_run) = result_run {
+                if let Some(result_run) = result_run.take() {
+                    // Display errors due to `run` before errors due to `down`.
                     result_run.expect("Error in `run`");
                 }
-                result_run = None;
                 result_down.expect("Error during teardown");
             }
         }

@@ -30,6 +30,7 @@ type HmacSha1 = Hmac<Sha1>;
 
 /// The maximal number of attempts when registering a user..
 const RETRY_ATTEMPTS: u64 = 10;
+const TIMEOUT_SEC: u64 = 15;
 
 #[derive(Clone, TypedBuilder, Debug, Deserialize)]
 pub struct User {
@@ -239,7 +240,10 @@ async fn ensure_user_exists(
     use matrix_sdk::ruma::api::error::*;
     let homeserver_url = reqwest::Url::parse(base_url)?;
     let config = ClientConfig::new();
-    config.get_request_config().retry_limit(RETRY_ATTEMPTS);
+    config
+        .get_request_config()
+        .retry_limit(RETRY_ATTEMPTS)
+        .retry_timeout(std::time::Duration::new(TIMEOUT_SEC, 0));
     let client = matrix_sdk::Client::new_with_config(homeserver_url, config)?;
     match client
         .login(&user.localname, &user.password, None, None)
