@@ -108,6 +108,11 @@ users:
       alias:
       # Optional. An alias for the room.
       # Default: No alias.
+      # If there is already a room with the same alias, the old alias will
+      # be unregistered (we assume that this was caused by a previous call
+      # to `mx-tester up`).
+      # It several rooms define the same `alias` in the same mx-tester.yml,
+      # this is an error.
       topic:
       # Optional. A topic for the room.
       # Default: No topic.

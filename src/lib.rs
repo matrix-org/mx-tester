@@ -804,9 +804,6 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
 
 FROM {docker_tag}
 
-# We need gcc to build pyahocorasick
-RUN apt-get update --quiet && apt-get install gcc --yes --quiet
-
 # Show the Synapse version, to aid with debugging.
 RUN pip show matrix-synapse
 
@@ -974,7 +971,10 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     // Let's make extra-sure by waiting until the container is not running
     // anymore *and* the ports are free.
     while docker.is_container_running(&setup_container_name).await? {
-        debug!("Waiting until docker container {} is down before relaunching it", setup_container_name);
+        debug!(
+            "Waiting until docker container {} is down before relaunching it",
+            setup_container_name
+        );
         tokio::time::sleep(std::time::Duration::new(5, 0)).await;
     }
     while let Some(mapping) = config.docker.port_mapping.iter().find(|mapping| {
