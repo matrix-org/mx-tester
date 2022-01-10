@@ -44,6 +44,22 @@ type HmacSha1 = Hmac<Sha1>;
 const RETRY_ATTEMPTS: u64 = 10;
 const TIMEOUT_SEC: u64 = 15;
 
+#[derive(Clone, Debug, Deserialize)]
+pub enum RateLimit {
+    /// Leave the rate limit unchanged.
+    #[serde(alias = "default")]
+    Default,
+
+    /// Specify that the user shouldn't be rate-limited.
+    #[serde(alias = "unlimited")]
+    Unlimited,
+}
+impl Default for RateLimit {
+    fn default() -> Self {
+        RateLimit::Default
+    }
+}
+
 #[derive(Clone, TypedBuilder, Debug, Deserialize)]
 pub struct User {
     /// Create user as admin?
@@ -61,6 +77,12 @@ pub struct User {
     #[serde(default)]
     #[builder(default)]
     pub rooms: Vec<Room>,
+
+    /// If specified, override the maximal number of messages per second
+    /// that this user can send.
+    #[serde(default)]
+    #[builder(default)]
+    pub rate_limit: RateLimit,
 }
 
 impl User {
@@ -278,6 +300,17 @@ async fn ensure_user_exists(
 }
 
 pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Error> {
+    // Create an admin user, we'll need it later.
+    let admin = ensure_user_exists(
+        &config.homeserver.public_baseurl,
+        &config.homeserver.registration_shared_secret,
+        &User::builder()
+            .admin(true)
+            .localname("mx-tester-admin".to_string())
+            .build(),
+    )
+    .await?;
+
     let mut clients = HashMap::new();
     // Create users
     for user in &config.users {
@@ -288,8 +321,21 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
         )
         .await
         .with_context(|| format!("Could not setup user {}", user.localname))?;
+
+        // If the user is not rate limited, remove the rate limit.
+        if let RateLimit::Unlimited = user.rate_limit {
+            use override_rate_limits::*;
+            let user_id = client
+                .user_id()
+                .await
+                .expect("Client doesn't have a user id");
+            let request = Request::new(&user_id, Some(0), Some(0));
+            let _ = admin.send(request, None).await?;
+        }
+
         clients.insert(user.localname.clone(), client);
     }
+
     // Create rooms
     let mut aliases = HashSet::new();
     for user in &config.users {
@@ -387,4 +433,70 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
         }
     }
     Ok(())
+}
+
+mod override_rate_limits {
+    use matrix_sdk::ruma::api::ruma_api;
+    use matrix_sdk::ruma::UserId;
+    use serde::{Deserialize, Serialize};
+
+    ruma_api! {
+        metadata: {
+            description: "Override rate limits",
+            method: POST,
+            name: "override_rate_limit",
+            path: "/_synapse/admin/v1/users/:user_id/override_ratelimit",
+            rate_limited: false,
+            authentication: AccessToken,
+        }
+
+        request: {
+            /// user ID
+            #[ruma_api(path)]
+            pub user_id: &'a UserId,
+
+            /// The number of actions that can be performed in a second. Defaults to 0.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub messages_per_second: Option<u32>,
+
+            /// How many actions that can be performed before being limited. Defaults to 0.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub burst_count: Option<u32>
+        }
+
+        response: {
+            /// Details about the user.
+            #[ruma_api(body)]
+            pub limits: UserLimits,
+        }
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub struct UserLimits {
+        pub messages_per_second: u32,
+        pub burst_count: u32,
+    }
+
+    impl<'a> Request<'a> {
+        /// Creates an `Request` with the given user ID.
+        pub fn new(
+            user_id: &'a UserId,
+            messages_per_second: Option<u32>,
+            burst_count: Option<u32>,
+        ) -> Self {
+            Self {
+                user_id,
+                messages_per_second,
+                burst_count,
+            }
+        }
+    }
+
+    impl Response {
+        /// Creates a new `Response` with all parameters defaulted.
+        #[allow(dead_code)]
+        pub fn new(limits: UserLimits) -> Self {
+            Self { limits }
+        }
+    }
 }

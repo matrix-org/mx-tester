@@ -70,3 +70,7 @@ uuid = { version = "0.8", features = ["v4"] }
 # Test APIs
 synapse-admin-api = {version = "0.2", features = ["client"] }
 
+[features]
+# Needed to use macro `ruma_api!`.
+client = []
+default = ["client"]
