@@ -683,6 +683,7 @@ async fn start_synapse_container(
         );
 
         // Write logs to the synapse data directory.
+
         let mut log_file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -802,9 +803,6 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
 # A custom Dockerfile to rebuild synapse from the official release + plugins
 
 FROM {docker_tag}
-
-# We need gcc to build pyahocorasick
-RUN apt-get update --quiet && apt-get install gcc --yes --quiet
 
 # Show the Synapse version, to aid with debugging.
 RUN pip show matrix-synapse
@@ -963,10 +961,29 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     let _ = docker.stop_container(&setup_container_name, None).await;
     let _ = docker.remove_container(&setup_container_name, None).await;
 
+    debug!("Updating homeserver.yaml");
     // Apply config from mx-tester.yml to the homeserver.yaml that was just created
     config
         .patch_homeserver_config()
         .context("Error updating homeserver config")?;
+
+    // Docker has a tendency to return before containers are fully torn down.
+    // Let's make extra-sure by waiting until the container is not running
+    // anymore *and* the ports are free.
+    while docker.is_container_running(&setup_container_name).await? {
+        debug!(
+            "Waiting until docker container {} is down before relaunching it",
+            setup_container_name
+        );
+        tokio::time::sleep(std::time::Duration::new(5, 0)).await;
+    }
+    while let Some(mapping) = config.docker.port_mapping.iter().find(|mapping| {
+        debug!("Checking whether port {} is available", mapping.host);
+        std::net::TcpListener::bind(("127.0.0.1", mapping.host as u16)).is_err()
+    }) {
+        debug!("Waiting until port {} is available", mapping.host);
+        tokio::time::sleep(std::time::Duration::new(5, 0)).await;
+    }
 
     // It's now time to run Synapse.
     start_synapse_container(
@@ -981,9 +998,24 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     .context("Failed to start Synapse")?;
 
     debug!("Synapse is now launched");
-    handle_user_registration(config)
-        .await
-        .context("Failed to setup users")?;
+    // Sometimes, Synapse fails to launch and user registration loops endlessly.
+    // Let's turn this into a reasonable error message on CI.
+    match tokio::time::timeout(std::time::Duration::new(120, 0), async {
+        handle_user_registration(config)
+            .await
+            .context("Failed to setup users")
+    })
+    .await
+    {
+        Err(_) => {
+            // Timeout.
+            panic!(
+                "User registration is taking too long. Is the container even running? {}",
+                docker.is_container_running(&run_container_name).await?
+            );
+        }
+        Ok(result) => result,
+    }?;
     if let Some(UpScript::FullUpScript(FullUpScript {
         after: Some(ref script),
         ..

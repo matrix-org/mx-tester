@@ -12,14 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, convert::TryFrom};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::TryFrom,
+};
 
 use anyhow::{anyhow, Context, Error};
 use async_trait::async_trait;
 use data_encoding::HEXLOWER;
 use hmac::{Hmac, Mac, NewMac};
 use log::debug;
-use matrix_sdk::ClientConfig;
+use matrix_sdk::{
+    ruma::{
+        api::{
+            client::{error::ErrorKind, Error as ClientError},
+            error::{FromHttpResponseError, ServerError},
+        },
+        RoomAliasId,
+    },
+    ClientConfig, HttpError,
+};
 use rand::Rng;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -30,6 +42,7 @@ type HmacSha1 = Hmac<Sha1>;
 
 /// The maximal number of attempts when registering a user..
 const RETRY_ATTEMPTS: u64 = 10;
+const TIMEOUT_SEC: u64 = 15;
 
 #[derive(Clone, TypedBuilder, Debug, Deserialize)]
 pub struct User {
@@ -239,7 +252,10 @@ async fn ensure_user_exists(
     use matrix_sdk::ruma::api::error::*;
     let homeserver_url = reqwest::Url::parse(base_url)?;
     let config = ClientConfig::new();
-    config.get_request_config().retry_limit(RETRY_ATTEMPTS);
+    config
+        .get_request_config()
+        .retry_limit(RETRY_ATTEMPTS)
+        .retry_timeout(std::time::Duration::new(TIMEOUT_SEC, 0));
     let client = matrix_sdk::Client::new_with_config(homeserver_url, config)?;
     match client
         .login(&user.localname, &user.password, None, None)
@@ -275,6 +291,7 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
         clients.insert(user.localname.clone(), client);
     }
     // Create rooms
+    let mut aliases = HashSet::new();
     for user in &config.users {
         if user.rooms.is_empty() {
             continue;
@@ -286,7 +303,6 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
                 user.localname
             )
         })?;
-        let joined_rooms = client.joined_rooms();
         for room in &user.rooms {
             let mut request = matrix_sdk::ruma::api::client::r0::room::create_room::Request::new();
             if room.public {
@@ -302,13 +318,40 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
                 request.name = Some(TryFrom::<&str>::try_from(name.as_str())?);
             }
             if let Some(ref alias) = room.alias {
-                request.room_alias_name = Some(alias.as_ref());
-                if joined_rooms.iter().any(|joined| {
-                    matches!(joined.canonical_alias(), Some(joined_alias) if joined_alias.as_str() == alias)
-                }) {
-                    // Don't re-register the room.
-                    continue;
+                if !aliases.insert(alias) {
+                    return Err(anyhow!(
+                        "Attempting to create more than one room with alias {}",
+                        alias
+                    ));
                 }
+                request.room_alias_name = Some(alias.as_ref());
+                // If the alias is already taken, we may need to remove it.
+                let full_alias = format!("#{}:{}", alias, config.homeserver.server_name);
+                debug!("Attempting to register alias {}, this may require unregistering previous instances first.", full_alias);
+                let room_alias_id = RoomAliasId::try_from(full_alias.as_ref())?;
+                match client
+                    .send(
+                        matrix_sdk::ruma::api::client::r0::alias::delete_alias::Request::new(
+                            &room_alias_id,
+                        ),
+                        None,
+                    )
+                    .await
+                {
+                    // Room alias was successfully removed.
+                    Ok(_) => Ok(()),
+                    // Room alias wasn't removed because it didn't exist.
+                    Err(HttpError::Server(ref code)) if code.as_u16() == 404 => Ok(()),
+                    Err(HttpError::ClientApi(FromHttpResponseError::Http(ServerError::Known(
+                        ClientError {
+                            kind: ErrorKind::NotFound,
+                            ..
+                        },
+                    )))) => Ok(()),
+                    // Room alias wasn't removed for any other reason.
+                    Err(err) => Err(err),
+                }
+                .context("Error while attempting to unregister existing alias")?;
             }
             if let Some(ref topic) = room.topic {
                 request.topic = Some(topic.as_ref());
