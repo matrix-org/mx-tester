@@ -809,8 +809,8 @@ RUN pip show matrix-synapse
 
 # Copy and install custom modules.
 RUN mkdir /mx-tester
-{copy}
 {setup}
+{copy}
 
 VOLUME [\"/data\"]
 ENTRYPOINT []
@@ -818,14 +818,14 @@ ENV SYNAPSE_HTTP_PORT=8008
 EXPOSE 8008/tcp 8009/tcp 8448/tcp
 ",
     docker_tag = docker_tag,
+    setup = config.modules.iter()
+        .filter_map(|module| module.install.as_ref().map(|script| format!("## Setup {}\n{}\n", module.name, script.lines.iter().map(|line| format!("RUN {}", line)).format("\n"))))
+        .format("\n"),
     copy = config.modules.iter()
         // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
         .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
         .format("\n"),
-    setup = config.modules.iter()
-        .filter_map(|module| module.install.as_ref().map(|script| format!("## Install {}\n{}\n", module.name, script.lines.iter().map(|line| format!("RUN {}", line)).format("\n"))))
-        .format("\n")
-);
+    );
     debug!("dockerfile {}", dockerfile_content);
 
     let dockerfile_path = synapse_root.join("Dockerfile");
