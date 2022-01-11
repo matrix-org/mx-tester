@@ -605,6 +605,11 @@ async fn start_synapse_container(
                         )]),
                         // Expose guest port `guest_mapping` as `host_mapping`.
                         port_bindings: Some(host_port_bindings),
+                        // Enable access to host as `host.docker.internal` from the guest.
+                        // On macOS and Windows, this is expected to be transparent but
+                        // on Linux, an option needs to be added.
+                        #[cfg(target_os = "linux")]
+                        extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
                         ..HostConfig::default()
                     }),
                     image: Some(config.tag()),
@@ -860,11 +865,6 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
                 t: config.tag(),
                 q: true,
                 rm: true,
-                // Enable access to host as `host.docker.internal` from the guest.
-                // On macOS and Windows, this is expected to be transparent but
-                // on Linux, an option needs to be added.
-                #[cfg(target_os = "linux")]
-                extrahosts: Some("host.docker.internal:host-gateway".to_string()),
                 ..Default::default()
             },
             config.credentials.serveraddress.as_ref().map(|server| {
