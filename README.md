@@ -207,3 +207,13 @@ credentials:
   # Default: No server.
   # May be overridden from the command-line with parameter `--server`.
 ```
+
+# Docker notes
+
+Everything is executed with Docker, with the same limitations and abstraction leaks.
+
+Host `host.docker.internal` should be configured on all platforms, which gives the guest Synapse (and modules) access to the host, should this be needed for tests.
+
+The guest container is running on a network called `mx-tester-synapse-$(TAG)`,
+where `TAG` is the Docker tag for the version of Synapse running. By default,
+that's `matrixdotorg/synapse:latest`.
