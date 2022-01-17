@@ -1,13 +1,10 @@
 [package]
 name = "mx-tester"
 description = "A tool to help test Matrix bots and Synapse modules."
-version = "0.2.5"
+version = "0.2.6"
 edition = "2018"
 license = "Apache-2.0"
 repository = "https://github.com/matrix-org/mx-tester"
-
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 # Command-line
@@ -41,8 +38,8 @@ tokio = { version = "1.12.0", features = ["full"] }
 tokio-util = { version = "0.6", features = ["codec"] }
 
 # Crypto verification
-hmac = "0.11.0"
-sha-1 = "0.9.8"
+hmac = "0.12.0"
+sha-1 = "0.10.0"
 data-encoding = "2.3.2"
 
 # Logging
