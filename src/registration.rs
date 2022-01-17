@@ -20,7 +20,7 @@ use std::{
 use anyhow::{anyhow, Context, Error};
 use async_trait::async_trait;
 use data_encoding::HEXLOWER;
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{Hmac, Mac};
 use log::debug;
 use matrix_sdk::{
     ruma::{

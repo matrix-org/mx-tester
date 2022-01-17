@@ -8,7 +8,7 @@ repository = "https://github.com/matrix-org/mx-tester"
 
 [dependencies]
 # Command-line
-clap = "2.3"
+clap = "3.0"
 comma = "1.0"
 ezexec = "0.2"
 shellexpand = "2.1"
