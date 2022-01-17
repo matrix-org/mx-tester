@@ -300,7 +300,7 @@ async fn ensure_user_exists(
 }
 
 pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Error> {
-    // Create an admin user, we'll need it later.
+    // Create an admin user. We'll need it later to unthrottle users.
     let admin = ensure_user_exists(
         &config.homeserver.public_baseurl,
         &config.homeserver.registration_shared_secret,
