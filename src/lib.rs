@@ -1015,8 +1015,12 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         Err(_) => {
             // Timeout.
             panic!(
-                "User registration is taking too long. Is the container even running? {}",
-                docker.is_container_running(&run_container_name).await?
+                "User registration is taking too long. {}",
+                if docker.is_container_running(&run_container_name).await? {
+                    "Container is running."
+                } else {
+                    "For some reason, Synapse has stopped. Please check the Synapse logs and/or rerun `mx-tester up`."
+                }
             );
         }
         Ok(result) => result,

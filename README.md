@@ -97,6 +97,9 @@ users:
     password:
     # Optional. If specified, a password for the user.
     # Default: "password".
+    rate_limit:
+    # Optional. If `unlimited`, remove rate limits for this user.
+    # Default: Use the global setting for rate limits.
     rooms:
     - # Optional. A list of rooms to create.
     - public:
@@ -120,6 +123,7 @@ users:
       # Optional. A list of users (created by `users`) to invite to the room.
       # mx-tester will ensure that these users join the room.
       # Default: No invites.
+
 
 # --- Configuring the homeserver
 
