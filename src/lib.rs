@@ -72,6 +72,12 @@ lazy_static! {
 /// The amount of memory to allocate
 const MEMORY_ALLOCATION_BYTES: i64 = 4 * 1024 * 1024 * 1024;
 
+/// When we're starting Synapse, how many time we should retry to launch it
+/// before giving up.
+const MAX_ATTEMPTS_TO_START_SYNAPSE: u8 = 10;
+const MAX_ATTEMPTS_TO_WAIT_FOR_SYNAPSE: u8 = 10;
+const SLEEP_WHILE_SYNAPSE_STARTS_MS: u64 = 1000;
+
 /// A port in the container made accessible on the host machine.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PortMapping {
@@ -990,20 +996,47 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         tokio::time::sleep(std::time::Duration::new(5, 0)).await;
     }
 
-    // It's now time to run Synapse.
-    start_synapse_container(
-        docker,
-        config,
-        &synapse_data_directory,
-        &run_container_name,
-        vec!["/start.py".to_string()],
-        true,
-    )
-    .await
-    .context("Failed to start Synapse")?;
-
-    debug!("Synapse is now launched");
     // Sometimes, Synapse fails to launch and user registration loops endlessly.
+    let mut synapse_is_running = false;
+    'try_to_launch_synapse: for i in 0..MAX_ATTEMPTS_TO_START_SYNAPSE {
+        // It's now time to run Synapse.
+        start_synapse_container(
+            docker,
+            config,
+            &synapse_data_directory,
+            &run_container_name,
+            vec!["/start.py".to_string()],
+            true,
+        )
+        .await
+        .context("Failed to start Synapse")?;
+
+        debug!("Synapse is now launched (attempt {})", i);
+
+        for j in 0..MAX_ATTEMPTS_TO_WAIT_FOR_SYNAPSE {
+            if is_synapse_ready(config).await? {
+                synapse_is_running = true;
+                break 'try_to_launch_synapse;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(
+                SLEEP_WHILE_SYNAPSE_STARTS_MS,
+            ))
+            .await;
+            if docker.is_container_running(&run_container_name).await? {
+                // Synapse startup didn't work out for reasons unknown.
+                continue 'try_to_launch_synapse;
+            }
+            debug!("Synapse is not ready yet {}, {}", i, j);
+        }
+    }
+
+    if !synapse_is_running {
+        panic!(
+            "Despite {} attempts, could not launch Synapse",
+            MAX_ATTEMPTS_TO_START_SYNAPSE
+        );
+    }
+
     // Let's turn this into a reasonable error message on CI.
     match tokio::time::timeout(std::time::Duration::new(120, 0), async {
         handle_user_registration(config)
@@ -1161,5 +1194,56 @@ impl DockerExt for Docker {
             .await?;
         debug!("is_container_created {:#?}", containers);
         Ok(containers.is_empty().not())
+    }
+}
+
+/// Attempt to detect whether Synapse is ready.
+///
+/// We consider that Synapse is ready if it is able to respond
+/// to an authentication request within a reasonable amount of
+/// time.
+async fn is_synapse_ready(config: &Config) -> Result<bool, Error> {
+    // To check whether Synapse is running, we attempt to login.
+    const RETRY_ATTEMPTS: u64 = 5;
+    const TIMEOUT_SEC: u64 = 5;
+    const USERNAME: &str = "i-do-not-exist-do-not-create-me";
+    const PASSWORD: &str = "wrong password";
+    let homeserver_url = reqwest::Url::parse(&config.homeserver.public_baseurl)?;
+    let config = matrix_sdk::ClientConfig::new();
+    config
+        .get_request_config()
+        .retry_limit(RETRY_ATTEMPTS)
+        .retry_timeout(std::time::Duration::new(TIMEOUT_SEC, 0));
+    let client = matrix_sdk::Client::new_with_config(homeserver_url, config)?;
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(TIMEOUT_SEC * RETRY_ATTEMPTS),
+        client.login(USERNAME, PASSWORD, None, None),
+    )
+    .await
+    {
+        Err(_) => {
+            // Timeout - Synapse isn't running.
+            Ok(false)
+        }
+        Ok(Err(matrix_sdk::Error::Http(matrix_sdk::HttpError::ClientApi(
+            matrix_sdk::ruma::api::error::FromHttpResponseError::Http(
+                matrix_sdk::ruma::api::error::ServerError::Known(err),
+            ),
+        )))) if err.kind == matrix_sdk::ruma::api::client::error::ErrorKind::Forbidden => {
+            // Could not authenticate, that's normal.
+            Ok(true)
+        }
+        Ok(Err(_)) => {
+            // Other errors probably mean that Synapse isn't running yet.
+            Ok(false)
+        }
+        Ok(Ok(_)) => {
+            // Could authenticate.
+            panic!(
+                "I manage to login as user {}. That shouldn't happen.",
+                USERNAME
+            );
+        }
     }
 }
