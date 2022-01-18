@@ -1028,7 +1028,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
                 SLEEP_WHILE_SYNAPSE_STARTS_MS,
             ))
             .await;
-            if docker.is_container_running(&run_container_name).await? {
+            if !docker.is_container_running(&run_container_name).await? {
                 // Synapse startup didn't work out for reasons unknown.
                 continue 'try_to_launch_synapse;
             }
@@ -1221,7 +1221,7 @@ impl DockerExt for Docker {
 /// is fixed, it doesn't check much that we find useful.
 async fn is_synapse_ready(config: &Config) -> Result<bool, Error> {
     // To check whether Synapse is running, we attempt to login.
-    const RETRY_ATTEMPTS: u64 = 5;
+    const RETRY_ATTEMPTS: u64 = 1;
     const TIMEOUT_SEC: u64 = 5;
     const USERNAME: &str = "i-do-not-exist-do-not-create-me";
     const PASSWORD: &str = "wrong password";
@@ -1233,6 +1233,9 @@ async fn is_synapse_ready(config: &Config) -> Result<bool, Error> {
         .retry_timeout(std::time::Duration::new(TIMEOUT_SEC, 0));
     let client = matrix_sdk::Client::new_with_config(homeserver_url, config)?;
 
+    // We're adding a `timout` here in addition to the `timeout` in `config` as testing
+    // suggests that matrix-rust-sdk (or at least some recent versions thereof) can
+    // sometimes loop forever during login even with retry timeouts/limits.
     match tokio::time::timeout(
         std::time::Duration::from_secs(TIMEOUT_SEC * RETRY_ATTEMPTS),
         client.login(USERNAME, PASSWORD, None, None),
@@ -1240,7 +1243,7 @@ async fn is_synapse_ready(config: &Config) -> Result<bool, Error> {
     .await
     {
         Err(_) => {
-            // Timeout - Synapse isn't running.
+            // Timeout - Synapse isn't running and logging is looping.
             Ok(false)
         }
         Ok(Err(matrix_sdk::Error::Http(matrix_sdk::HttpError::ClientApi(
