@@ -1,6 +1,7 @@
 use std::ops::Not;
 
 use lazy_static::lazy_static;
+use log::info;
 use mx_tester::{self, registration::User, *};
 
 lazy_static! {
@@ -82,7 +83,7 @@ async fn test_create_users() {
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
-    tokio::time::timeout(std::time::Duration::from_secs(180), async {
+    tokio::time::timeout(std::time::Duration::from_secs(1800), async {
         mx_tester::up(&docker, &config)
             .await
             .expect("Failed in step `up`")
@@ -176,4 +177,45 @@ async fn test_create_users() {
     mx_tester::down(&docker, &config, Status::Manual)
         .await
         .expect("Failed in step `down`");
+}
+
+/// Simple test: repeat numerous times up/down, to increase the
+/// chances of hitting one the cases in which Synapse fails
+/// during startup.
+#[tokio::test]
+async fn test_repeat() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let docker = DOCKER.clone();
+    let config = Config::builder()
+        .name("test-repeat".into())
+        .synapse(SynapseVersion::Docker {
+            tag: SYNAPSE_VERSION.into(),
+        })
+        .homeserver(
+            HomeserverConfig::builder()
+                .server_name("localhost:9997".to_string())
+                .public_baseurl("http://localhost:9997".to_string())
+                .build(),
+        )
+        .docker(
+            DockerConfig::builder()
+                .port_mapping(vec![PortMapping {
+                    host: 9997,
+                    guest: 8008,
+                }])
+                .build(),
+        )
+        .build();
+    mx_tester::build(&docker, &config)
+        .await
+        .expect("Failed in step `build`");
+    for i in 0..100 {
+        info!("test_repeat: iteration {}", i);
+        mx_tester::up(&docker, &config)
+            .await
+            .expect("Failed in step `up`");
+        mx_tester::down(&docker, &config, Status::Manual)
+            .await
+            .expect("Failed in step `down`");
+    }
 }
