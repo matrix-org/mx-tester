@@ -1003,7 +1003,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     //
     // The best workaround we have atm is to retry Synapse launch until it
     // seems to have worked.
-    let mut synapse_is_running = false;
+    let mut synapse_is_responsive = false;
     'try_to_launch_synapse: for i in 0..MAX_ATTEMPTS_TO_START_SYNAPSE {
         // It's now time to run Synapse.
         start_synapse_container(
@@ -1021,7 +1021,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
 
         for j in 0..MAX_ATTEMPTS_TO_WAIT_FOR_SYNAPSE {
             if is_synapse_ready(config).await? {
-                synapse_is_running = true;
+                synapse_is_responsive = true;
                 break 'try_to_launch_synapse;
             }
             tokio::time::sleep(std::time::Duration::from_millis(
@@ -1036,14 +1036,21 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         }
     }
 
-    if !synapse_is_running {
+    if !synapse_is_responsive {
         panic!(
             "Despite {} attempts, could not launch Synapse",
             MAX_ATTEMPTS_TO_START_SYNAPSE
         );
     }
 
-    // Let's turn this into a reasonable error message on CI.
+    // We should now be able to register users.
+    //
+    // As of this writing, we're not sure whether the `synapse_is_responsive` manipulation
+    // above works. If it doesn't, we can still have a case in which Synapse won't start,
+    // causing `handle_user_registration` to loop endlessly. The `timeout` should make
+    // sure that we fail properly and with an understandable error message.
+    //
+    // This will presumably disappear if the `synapse_is_responsive` manipulation above works.
     match tokio::time::timeout(std::time::Duration::new(120, 0), async {
         handle_user_registration(config)
             .await
@@ -1208,6 +1215,10 @@ impl DockerExt for Docker {
 /// We consider that Synapse is ready if it is able to respond
 /// to an authentication request within a reasonable amount of
 /// time.
+///
+/// Ideally, we'd like to use the halth checks built into the
+/// docker image, but until https://github.com/matrix-org/synapse/issues/11473
+/// is fixed, it doesn't check much that we find useful.
 async fn is_synapse_ready(config: &Config) -> Result<bool, Error> {
     // To check whether Synapse is running, we attempt to login.
     const RETRY_ATTEMPTS: u64 = 5;
