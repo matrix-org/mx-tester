@@ -191,6 +191,20 @@ async fn test_repeat() {
         .synapse(SynapseVersion::Docker {
             tag: SYNAPSE_VERSION.into(),
         })
+        .homeserver(
+            HomeserverConfig::builder()
+                .server_name("localhost:9997".to_string())
+                .public_baseurl("http://localhost:9997".to_string())
+                .build(),
+        )
+        .docker(
+            DockerConfig::builder()
+                .port_mapping(vec![PortMapping {
+                    host: 9997,
+                    guest: 8008,
+                }])
+                .build(),
+        )
         .build();
     mx_tester::build(&docker, &config)
         .await
