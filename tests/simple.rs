@@ -82,7 +82,7 @@ async fn test_create_users() {
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
-    tokio::time::timeout(std::time::Duration::from_secs(180), async {
+    tokio::time::timeout(std::time::Duration::from_secs(1800), async {
         mx_tester::up(&docker, &config)
             .await
             .expect("Failed in step `up`")
