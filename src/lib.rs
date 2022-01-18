@@ -995,8 +995,14 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         debug!("Waiting until port {} is available", mapping.host);
         tokio::time::sleep(std::time::Duration::new(5, 0)).await;
     }
+    debug!("Port is available, proceeding");
 
-    // Sometimes, Synapse fails to launch and user registration loops endlessly.
+    // Sometimes, Synapse fails to launch, either because it cannot open the
+    // port (possibly Unix isn't actually closing it fast enough) or because
+    // it receives a SIGTERM for reasons so far unknown.
+    //
+    // The best workaround we have atm is to retry Synapse launch until it
+    // seems to have worked.
     let mut synapse_is_running = false;
     'try_to_launch_synapse: for i in 0..MAX_ATTEMPTS_TO_START_SYNAPSE {
         // It's now time to run Synapse.
