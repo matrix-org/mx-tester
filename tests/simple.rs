@@ -209,7 +209,7 @@ async fn test_repeat() {
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
-    for i in 0..100 {
+    for i in 0..200 {
         info!("test_repeat: iteration {}", i);
         mx_tester::up(&docker, &config)
             .await

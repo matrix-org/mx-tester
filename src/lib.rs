@@ -32,7 +32,10 @@ use bollard::{
         LogsOptions, StartContainerOptions, WaitContainerOptions,
     },
     exec::{CreateExecOptions, StartExecOptions},
-    models::{EndpointSettings, HostConfig, HostConfigLogConfig, PortBinding},
+    models::{
+        EndpointSettings, HostConfig, HostConfigLogConfig, PortBinding, RestartPolicy,
+        RestartPolicyNameEnum,
+    },
     network::{ConnectNetworkOptions, CreateNetworkOptions, ListNetworksOptions},
     Docker,
 };
@@ -71,12 +74,6 @@ lazy_static! {
 
 /// The amount of memory to allocate
 const MEMORY_ALLOCATION_BYTES: i64 = 4 * 1024 * 1024 * 1024;
-
-/// When we're starting Synapse, how many time we should retry to launch it
-/// before giving up.
-const MAX_ATTEMPTS_TO_START_SYNAPSE: u8 = 10;
-const MAX_ATTEMPTS_TO_WAIT_FOR_SYNAPSE: u8 = 10;
-const SLEEP_WHILE_SYNAPSE_STARTS_MS: u64 = 1000;
 
 /// A port in the container made accessible on the host machine.
 #[derive(Clone, Debug, Deserialize)]
@@ -601,6 +598,13 @@ async fn start_synapse_container(
                             typ: Some("json-file".to_string()),
                             config: None,
                         }),
+                        // Synapse has a tendency to not start correctly
+                        // or to stop shortly after startup. The following
+                        // restart policy seems to help a lot.
+                        restart_policy: Some(RestartPolicy {
+                            name: Some(RestartPolicyNameEnum::ALWAYS),
+                            maximum_retry_count: None,
+                        }),
                         // Extremely large memory allowance.
                         memory_reservation: Some(MEMORY_ALLOCATION_BYTES),
                         memory_swap: Some(-1),
@@ -996,52 +1000,18 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         tokio::time::sleep(std::time::Duration::new(5, 0)).await;
     }
     debug!("Port is available, proceeding");
+    start_synapse_container(
+        docker,
+        config,
+        &synapse_data_directory,
+        &run_container_name,
+        vec!["/start.py".to_string()],
+        true,
+    )
+    .await
+    .context("Failed to start Synapse")?;
 
-    // Sometimes, Synapse fails to launch, either because it cannot open the
-    // port (possibly Unix isn't actually closing it fast enough) or because
-    // it receives a SIGTERM for reasons so far unknown.
-    //
-    // The best workaround we have atm is to retry Synapse launch until it
-    // seems to have worked.
-    let mut synapse_is_responsive = false;
-    'try_to_launch_synapse: for i in 0..MAX_ATTEMPTS_TO_START_SYNAPSE {
-        // It's now time to run Synapse.
-        start_synapse_container(
-            docker,
-            config,
-            &synapse_data_directory,
-            &run_container_name,
-            vec!["/start.py".to_string()],
-            true,
-        )
-        .await
-        .context("Failed to start Synapse")?;
-
-        debug!("Synapse is now launched (attempt {})", i);
-
-        for j in 0..MAX_ATTEMPTS_TO_WAIT_FOR_SYNAPSE {
-            if is_synapse_ready(config).await? {
-                synapse_is_responsive = true;
-                break 'try_to_launch_synapse;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(
-                SLEEP_WHILE_SYNAPSE_STARTS_MS,
-            ))
-            .await;
-            if !docker.is_container_running(&run_container_name).await? {
-                // Synapse startup didn't work out for reasons unknown.
-                continue 'try_to_launch_synapse;
-            }
-            debug!("Synapse is not ready yet {}, {}", i, j);
-        }
-    }
-
-    if !synapse_is_responsive {
-        panic!(
-            "Despite {} attempts, could not launch Synapse",
-            MAX_ATTEMPTS_TO_START_SYNAPSE
-        );
-    }
+    debug!("Synapse should now be launched and ready");
 
     // We should now be able to register users.
     //
@@ -1207,63 +1177,5 @@ impl DockerExt for Docker {
             .await?;
         debug!("is_container_created {:#?}", containers);
         Ok(containers.is_empty().not())
-    }
-}
-
-/// Attempt to detect whether Synapse is ready.
-///
-/// We consider that Synapse is ready if it is able to respond
-/// to an authentication request within a reasonable amount of
-/// time.
-///
-/// Ideally, we'd like to use the halth checks built into the
-/// docker image, but until https://github.com/matrix-org/synapse/issues/11473
-/// is fixed, it doesn't check much that we find useful.
-async fn is_synapse_ready(config: &Config) -> Result<bool, Error> {
-    // To check whether Synapse is running, we attempt to login.
-    const RETRY_ATTEMPTS: u64 = 1;
-    const TIMEOUT_SEC: u64 = 5;
-    const USERNAME: &str = "i-do-not-exist-do-not-create-me";
-    const PASSWORD: &str = "wrong password";
-    let homeserver_url = reqwest::Url::parse(&config.homeserver.public_baseurl)?;
-    let config = matrix_sdk::ClientConfig::new();
-    config
-        .get_request_config()
-        .retry_limit(RETRY_ATTEMPTS)
-        .retry_timeout(std::time::Duration::new(TIMEOUT_SEC, 0));
-    let client = matrix_sdk::Client::new_with_config(homeserver_url, config)?;
-
-    // We're adding a `timout` here in addition to the `timeout` in `config` as testing
-    // suggests that matrix-rust-sdk (or at least some recent versions thereof) can
-    // sometimes loop forever during login even with retry timeouts/limits.
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(TIMEOUT_SEC * RETRY_ATTEMPTS),
-        client.login(USERNAME, PASSWORD, None, None),
-    )
-    .await
-    {
-        Err(_) => {
-            // Timeout - Synapse isn't running and logging is looping.
-            Ok(false)
-        }
-        Ok(Err(matrix_sdk::Error::Http(matrix_sdk::HttpError::ClientApi(
-            matrix_sdk::ruma::api::error::FromHttpResponseError::Http(
-                matrix_sdk::ruma::api::error::ServerError::Known(err),
-            ),
-        )))) if err.kind == matrix_sdk::ruma::api::client::error::ErrorKind::Forbidden => {
-            // Could not authenticate, that's normal.
-            Ok(true)
-        }
-        Ok(Err(_)) => {
-            // Other errors probably mean that Synapse isn't running yet.
-            Ok(false)
-        }
-        Ok(Ok(_)) => {
-            // Could authenticate.
-            panic!(
-                "I manage to login as user {}. That shouldn't happen.",
-                USERNAME
-            );
-        }
     }
 }
