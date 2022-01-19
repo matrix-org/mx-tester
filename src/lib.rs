@@ -75,6 +75,14 @@ lazy_static! {
 /// The amount of memory to allocate
 const MEMORY_ALLOCATION_BYTES: i64 = 4 * 1024 * 1024 * 1024;
 
+/// The maximal number of times we can restart Synapse in case it stops accidentally.
+///
+/// Accidental stops are typically due:
+/// 1. to Synapse not being able to open its port at startup (this happens, for reasons unknown);
+/// 2. to Synapse receiving a SIGTERM (this happens, for reasons unknown);
+/// 3. to a synax error or startup error in a module.
+const MAX_SYNAPSE_RESTART_COUNT: i64 = 20;
+
 /// A port in the container made accessible on the host machine.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PortMapping {
@@ -603,7 +611,7 @@ async fn start_synapse_container(
                         // restart policy seems to help a lot.
                         restart_policy: Some(RestartPolicy {
                             name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
-                            maximum_retry_count: None,
+                            maximum_retry_count: Some(MAX_SYNAPSE_RESTART_COUNT),
                         }),
                         // Extremely large memory allowance.
                         memory_reservation: Some(MEMORY_ALLOCATION_BYTES),
