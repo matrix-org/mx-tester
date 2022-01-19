@@ -602,7 +602,7 @@ async fn start_synapse_container(
                         // or to stop shortly after startup. The following
                         // restart policy seems to help a lot.
                         restart_policy: Some(RestartPolicy {
-                            name: Some(RestartPolicyNameEnum::ALWAYS),
+                            name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
                             maximum_retry_count: None,
                         }),
                         // Extremely large memory allowance.
