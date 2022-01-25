@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
+
 use anyhow::Context;
 use log::*;
 use mx_tester::*;
+
+const CONFIG_PATH_AUTOTEST: &str = "[empty]";
 
 #[derive(Debug)]
 enum Command {
@@ -26,26 +30,27 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    use clap::{Arg, Command as App};
     env_logger::init();
-    let matches = clap::Command::new("mx-tester")
+    let matches = App::new("mx-tester")
         .version(std::env!("CARGO_PKG_VERSION"))
         .about("Command-line tool to simplify testing Matrix bots and Synapse modules")
         .arg(
-            clap::Arg::new("config")
+            Arg::new("config")
                 .short('c')
                 .long("config")
                 .default_value("mx-tester.yml")
-                .help("The file containing the test configuration."),
+                .help("The file containing the test configuration. Pass `[empty]` to run an empty mx-tester.yml, for self-testing."),
         )
         .arg(
-            clap::Arg::new("command")
+            Arg::new("command")
                 .multiple_occurrences(true)
                 .takes_value(false)
                 .possible_values(&["up", "run", "down", "build"])
                 .help("The list of commands to run. Order matters and the same command may be repeated."),
         )
         .arg(
-            clap::Arg::new("username")
+            Arg::new("username")
                 .short('u')
                 .long("username")
                 .takes_value(true)
@@ -53,7 +58,7 @@ async fn main() {
                 .help("A username for logging to the Docker registry")
         )
         .arg(
-            clap::Arg::new("password")
+            Arg::new("password")
                 .short('p')
                 .long("password")
                 .takes_value(true)
@@ -61,32 +66,57 @@ async fn main() {
                 .help("A password for logging to the Docker registry")
         )
         .arg(
-            clap::Arg::new("server")
+            Arg::new("server")
                 .long("server")
                 .takes_value(true)
                 .required(false)
                 .help("A server name for the Docker registry")
         )
         .arg(
-            clap::Arg::new("root_dir")
+            Arg::new("root_dir")
                 .long("root")
+                .value_name("PATH")
                 .takes_value(true)
                 .required(false)
                 .help("Write all files in subdirectories of this directory (default: /tmp)")
+        )
+        .arg(
+            Arg::new("workers")
+                .long("workers")
+                .takes_value(false)
+                .required(false)
+                .help("If specified, use workerized Synapse (default: no workers). If you have run `build` with `--workers`, make sure that `up` and `build` are also run with `--workers`.")
+        )
+        .arg(
+            Arg::new("synapse-tag")
+                .long("synapse-tag")
+                .value_name("TAG")
+                .takes_value(true)
+                .required(false)
+                .help("If specified, use the Docker image published with TAG (default: use mx-tester.yml or tag `latest`)")
+        )
+        .arg(
+            Arg::new("no-autoclean-on-error")
+                .long("no-autoclean-on-error")
+                .takes_value(false)
+                .help("If specified, do NOT clean up containers in case of error")
+        )
+        .arg(
+            Arg::new("docker-ssl")
+                .long("docker-ssl")
+                .default_value("detect")
+                .possible_values(&["always", "never", "detect"])
+                .help("If `detect`, attempt to auto-detect a SSL configuration and fallback tp HTTP otherwise. This may be broken in your CI. If `always`, fail if there is no Docker SSL configuration. If `never`, ignore any Docker SSL configuration.")
         )
         .get_matches();
 
     let config_path = matches
         .value_of("config")
         .expect("Missing value for `config`");
-    let config_file = std::fs::File::open(config_path)
-        .unwrap_or_else(|err| panic!("Could not open config file `{}`: {}", config_path, err));
-
-    let mut config: Config = serde_yaml::from_reader(config_file)
-        .unwrap_or_else(|err| panic!("Invalid config file `{}`: {}", config_path, err));
-    debug!("Config: {:2?}", config);
+    let is_self_test = config_path == CONFIG_PATH_AUTOTEST;
 
     let commands = match matches.values_of("command") {
+        None if is_self_test => vec![],
         None => vec![Command::Up, Command::Run, Command::Down],
         Some(values) => values
             .map(|command| match command {
@@ -99,6 +129,24 @@ async fn main() {
             .collect(),
     };
     debug!("Running {:?}", commands);
+
+    let mut config = {
+        if is_self_test {
+            Config::builder()
+                .name("mx-tester-autotest".to_string())
+                .build()
+        } else {
+            let config_file = std::fs::File::open(config_path).unwrap_or_else(|err| {
+                panic!("Could not open config file `{}`: {}", config_path, err)
+            });
+            serde_yaml::from_reader(config_file)
+                .unwrap_or_else(|err| panic!("Invalid config file `{}`: {}", config_path, err))
+        }
+    };
+    debug!("Config: {:2?}", config);
+    for (key, value) in std::env::vars().filter(|(key, _)| key.starts_with("DOCKER_")) {
+        debug!("{}={}", key, value);
+    }
     debug!("Root: {:?}", config.test_root());
 
     if let Some(server) = matches.value_of("server") {
@@ -113,27 +161,71 @@ async fn main() {
     if let Some(root) = matches.value_of("root_dir") {
         config.directories.root = std::path::Path::new(root).to_path_buf()
     }
+    let workers = matches.is_present("workers");
+    config.workers.enabled = workers;
+    if let Some(synapse_tag) = matches.value_of("synapse-tag") {
+        config.synapse = SynapseVersion::Docker {
+            tag: format!("matrixdotorg/synapse:{}", synapse_tag),
+        };
+    }
+
+    enum ShouldSsl {
+        Never,
+        Detect,
+        Always,
+    }
+    let should_ssl = match matches.value_of("docker-ssl").unwrap() {
+        "never" => ShouldSsl::Never,
+        "detect" => ShouldSsl::Detect,
+        "always" => ShouldSsl::Always,
+        _ => panic!(), // This should be caught by Clap
+    };
 
     // Now run the scripts.
     // We stop immediately if `build` or `up` fails but if `run` fails,
     // we may need to run some cleanup before stopping.
 
-    if commands.is_empty() {
+    if !is_self_test && commands.is_empty() {
         // No need to initialize Docker.
         return;
     }
 
-    let docker = if let Some(ref server) = config.credentials.serveraddress {
-        // If we have provided a server, well, let's use it.
-        // This is mainly useful for running in CI.
-        info!("Using docker repository {}", server);
-        bollard::Docker::connect_with_http_defaults().context("Connecting with http defaults")
-    } else {
-        // Otherwise, use the local defaults.
-        info!("Using local docker repository");
-        bollard::Docker::connect_with_local_defaults().context("Connecting with local defaults")
-    }
-    .expect("Failed to connect to the Docker daemon");
+    println!(
+        "mx-tester {version} starting. Logs will be stored at {logs_dir:?}",
+        version = env!("CARGO_PKG_VERSION"),
+        logs_dir = config.logs_dir()
+    );
+    let has_docker_cert_path = std::env::var("DOCKER_CERT_PATH").is_ok();
+    let mut docker = match (should_ssl, &config.credentials.serveraddress, has_docker_cert_path) {
+        // No server configured => we can only run locally.
+        (ShouldSsl::Never, None, _) | (ShouldSsl::Detect, None, _) => {
+            info!("Using local docker repository");
+            bollard::Docker::connect_with_local_defaults().context("Connecting with local defaults")    
+        }
+        (ShouldSsl::Always, None, _) => {
+            panic!("Option conflict: `--docker-ssl=always` requires option `--server` or an server address in mx-tester.yml")
+        }
+        // Server configured => we can run either with HTTP or SSL.
+        (ShouldSsl::Never, &Some(ref server), _) | (ShouldSsl::Detect, &Some(ref server), false) => {
+            info!("Using docker repository with HTTP {}", server);
+            bollard::Docker::connect_with_http_defaults().context("Connecting with HTTP")            
+        },
+        (ShouldSsl::Always, &Some(ref server), _) | (ShouldSsl::Detect, &Some(ref server), true) => {
+            info!("Using docker repository with SSL {}", server);
+            bollard::Docker::connect_with_ssl_defaults().context("Connecting with SSL")
+        }
+    }.expect("Failed to connect to the Docker daemon");
+    docker.set_timeout(std::time::Duration::from_secs(600));
+
+    // Test that we can connect to Docker.
+    let version = docker
+        .version()
+        .await
+        .expect("Checking connection to docker daemon");
+    println!(
+        "Using docker {}",
+        version.version.map(Cow::from).unwrap_or_else(|| "?".into())
+    );
 
     // Store the results of a `run` command in case it's followed by
     // a `down` command, which needs to decide between a success path
@@ -151,7 +243,7 @@ async fn main() {
             }
             Command::Run => {
                 info!("mx-tester run...");
-                result_run = Some(run(&docker, &config));
+                result_run = Some(run(&docker, &config).await);
             }
             Command::Down => {
                 info!("mx-tester down...");
@@ -173,4 +265,5 @@ async fn main() {
         // We haven't consumed the result of run().
         result.expect("Error in `run`");
     }
+    println!("* mx-tester success");
 }

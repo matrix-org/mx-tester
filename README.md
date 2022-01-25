@@ -26,6 +26,13 @@ $ mx-tester run
 $ mx-tester down
 ```
 
+or in a single go
+
+```sh
+$ mx-tester build up run down
+```
+
+
 # Setting up `mx-tester`.
 
 `mx-tester` requires a configuration file, typically called `mx-tester.yml`.
@@ -210,6 +217,38 @@ credentials:
   # Optional. Specify a server to connect to the registry.
   # Default: No server.
   # May be overridden from the command-line with parameter `--server`.
+
+# Optional
+workers:
+  enabled:
+  # A boolean. Specify `true` to launch Synapse with workers.
+  # Default: No workers.
+  # May be overridden from the command-line with parameter `--workers`.
+```
+
+# Debugging
+
+By default, mx-tester has *very little* in terms of outputs.
+
+mx-tester needs to deal with many tools, each of which has its own logs. To aid you with debugging, mx-tester store all these logs in `/tmp/mx-tester/$(YOUR_PROJECT)/logs` (or the equivalent directory on your platform). Don't hesitate to look at them :)
+
+The structure roughly looks like:
+
+- `logs/`
+  - `mx-tester/` Logs for the scripts provided in `mx-tester.yml`
+    - `up.out`, `up.log` Logs for the `up` script.
+    - `run.out`, `run.log` Logs for the `run` script.
+    - `modules/` Logs for the `build` scripts of the `modules` provided in `mx-tester.yml`
+  - `nginx/` If you're running with workers, the nginx load-balancer.
+  - `workers/` If you're running with workers, the logs for each worker.
+  - `docker/` The logs for everything running in Docker.
+    - `build.out`, `build.log` Logs everything that was executed on the guest during `mx-tester build` step.
+    - `up-run-down.out`, `up-run-down.log` Logs everything that was executed on the guest during steps `mx-tester up`, `mx-tester run` and `mx-tester down`.
+
+If you wish to look at all the output of these tools during execution, you may prefix your call to `mx-tester` as follows:
+
+```sh
+$ RUST_LOG=debug,bollard=error mx-tester run # and/or build, up, down...
 ```
 
 # Docker notes
@@ -221,3 +260,4 @@ Host `host.docker.internal` should be configured on all platforms, which gives t
 The guest container is running on a network called `mx-tester-synapse-$(TAG)`,
 where `TAG` is the Docker tag for the version of Synapse running. By default,
 that's `matrixdotorg/synapse:latest`.
+
