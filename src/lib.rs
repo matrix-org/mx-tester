@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod cleanup;
+pub mod exec;
 pub mod registration;
+mod util;
 
 use std::{
     borrow::Cow,
     collections::HashMap,
     ffi::{OsStr, OsString},
-    io::{LineWriter, Write},
-    ops::Not,
-    path::{Path, PathBuf},
+    io::Write,
+    path::PathBuf,
     str::FromStr,
 };
 
@@ -39,16 +41,22 @@ use bollard::{
     network::{ConnectNetworkOptions, CreateNetworkOptions, ListNetworksOptions},
     Docker,
 };
+use cleanup::{Cleanup, Disarm};
 use futures_util::stream::StreamExt;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio_util::codec::{BytesCodec, FramedRead};
 use typed_builder::TypedBuilder;
 
 use registration::{handle_user_registration, User};
+
+use crate::{
+    exec::{CommandExt, Executor},
+    util::YamlExt,
+};
 
 lazy_static! {
     /// Environment variable: the directory where a given module should be copied.
@@ -70,6 +78,26 @@ lazy_static! {
     ///
     /// Passed to `build`, `up`, `run`, `down` scripts.
     static ref MX_TEST_CWD: OsString = OsString::from_str("MX_TEST_CWD").unwrap();
+
+    /// Environment variable: defined if workers are enabled.
+    ///
+    /// Passed to `build`, `up`, `run`, `down` scripts.
+    static ref MX_TEST_WORKERS_ENABLED: OsString = OsString::from_str("MX_TEST_WORKERS_ENABLED").unwrap();
+
+    /// Environment variable: the name of the network.
+    ///
+    /// Passed to `build`, `up`, `run`, `down` scripts.
+    static ref MX_TEST_NETWORK_NAME: OsString = OsString::from_str("MX_TEST_NETWORK_NAME").unwrap();
+
+    /// Environment variable: the name of the container used during the build phase.
+    ///
+    /// Passed to `build`, `up`, `run`, `down` scripts.
+    static ref MX_TEST_SETUP_CONTAINER_NAME: OsString = OsString::from_str("MX_TEST_SETUP_CONTAINER_NAME").unwrap();
+
+    /// Environment variable: the name of the container used during the up, run, down phases.
+    ///
+    /// Passed to `build`, `up`, `run`, `down` scripts.
+    static ref MX_TEST_UP_RUN_DOWN_CONTAINER_NAME: OsString = OsString::from_str("MX_TEST_UP_RUN_DOWN_CONTAINER_NAME").unwrap();
 }
 
 /// The amount of memory to allocate
@@ -82,6 +110,18 @@ const MEMORY_ALLOCATION_BYTES: i64 = 4 * 1024 * 1024 * 1024;
 /// 2. to Synapse receiving a SIGTERM (this happens, for reasons unknown);
 /// 3. to a synax error or startup error in a module.
 const MAX_SYNAPSE_RESTART_COUNT: i64 = 20;
+
+/// The port used by the homeserver inside Docker.
+///
+/// In single process mode, that's the port used by Synapse.
+/// In worker mode, that's the port used by nginx as a load-balancer.
+const HARDCODED_GUEST_PORT: u64 = 8008;
+
+/// In worker mode, the port used by the homeserver for the main process
+/// inside Docker.
+const HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT: u64 = 8080;
+
+const TIMEOUT_USER_REGISTRATION_SIMPLE: std::time::Duration = std::time::Duration::new(120, 0);
 
 /// A port in the container made accessible on the host machine.
 #[derive(Clone, Debug, Deserialize)]
@@ -103,29 +143,23 @@ pub struct DockerConfig {
     pub hostname: String,
 
     /// The docker port mapping configuration to use for the synapse container.
-    #[serde(default = "DockerConfig::default_port_mapping")]
-    #[builder(default = DockerConfig::default_port_mapping())]
+    ///
+    /// When generating the Docker image and the Synapse configuration,
+    /// we automatically add a mapping HARDCODED_GUEST_PORT -> `homeserver_config.host_port`.
+    #[serde(default)]
+    #[builder(default = vec![])]
     pub port_mapping: Vec<PortMapping>,
 }
 
 impl Default for DockerConfig {
     fn default() -> DockerConfig {
-        DockerConfig {
-            hostname: Self::default_hostname(),
-            port_mapping: Self::default_port_mapping(),
-        }
+        Self::builder().build()
     }
 }
 
 impl DockerConfig {
     fn default_hostname() -> String {
         "synapse".to_string()
-    }
-    fn default_port_mapping() -> Vec<PortMapping> {
-        vec![PortMapping {
-            host: 9999,
-            guest: 8008,
-        }]
     }
 }
 
@@ -134,6 +168,11 @@ impl DockerConfig {
 /// This will be applied to homeserver.yaml.
 #[derive(Debug, Deserialize, Serialize, TypedBuilder)]
 pub struct HomeserverConfig {
+    /// The port exposed on the host
+    #[serde(default = "HomeserverConfig::host_port_default")]
+    #[builder(default = HomeserverConfig::host_port_default())]
+    pub host_port: u64,
+
     /// The name of the homeserver.
     #[serde(default = "HomeserverConfig::server_name_default")]
     #[builder(default = HomeserverConfig::server_name_default())]
@@ -162,6 +201,15 @@ impl Default for HomeserverConfig {
 }
 
 impl HomeserverConfig {
+    /// Set the port, resetting the public base url.
+    pub fn set_host_port(&mut self, port: u64) {
+        self.host_port = port;
+        self.server_name = format!("localhost:{}", port);
+        self.public_baseurl = format!("http://localhost:{}", port);
+    }
+    pub fn host_port_default() -> u64 {
+        9999
+    }
     pub fn server_name_default() -> String {
         "localhost:9999".to_string()
     }
@@ -173,10 +221,25 @@ impl HomeserverConfig {
     }
 }
 
+/// Configuring workers
+#[derive(Debug, TypedBuilder, Deserialize)]
+pub struct WorkersConfig {
+    #[serde(default)]
+    #[builder(default = false)]
+    pub enabled: bool,
+}
+impl Default for WorkersConfig {
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
+
 /// The contents of a mx-tester.yaml
 #[derive(Debug, TypedBuilder, Deserialize)]
 pub struct Config {
     /// A name for this test.
+    ///
+    /// This name is used to generate images, Docker networks, etc.
     pub name: String,
 
     /// Modules to install in Synapse.
@@ -232,6 +295,20 @@ pub struct Config {
     ///
     /// May be overridden from the command-line.
     pub directories: Directories,
+
+    #[serde(default)]
+    #[builder(default)]
+    /// Specify whether workers should be used.
+    ///
+    /// May be overridden from the command-line.
+    pub workers: WorkersConfig,
+
+    #[serde(default = "util::true_")]
+    #[builder(default = true)]
+    /// Specify whether workers should be used.
+    ///
+    /// May be overridden from the command-line.
+    pub autoclean_on_error: bool,
 }
 
 impl Config {
@@ -242,21 +319,51 @@ impl Config {
     /// script step.
     pub fn shared_env_variables(&self) -> Result<HashMap<&'static OsStr, OsString>, Error> {
         let synapse_root = self.synapse_root();
-        let script_tmpdir = self.directories.root.join("scripts");
+        let script_tmpdir = synapse_root.join("scripts");
         std::fs::create_dir_all(&script_tmpdir)
             .with_context(|| format!("Could not create directory {:#?}", script_tmpdir,))?;
         let curdir = std::env::current_dir()?;
-        let mut env: HashMap<&'static OsStr, _> = HashMap::new();
-        env.insert(&*MX_TEST_SYNAPSE_DIR, synapse_root.as_os_str().into());
-        env.insert(&*MX_TEST_SCRIPT_TMPDIR, script_tmpdir.as_os_str().into());
-        env.insert(&*MX_TEST_CWD, curdir.as_os_str().into());
+        let env: HashMap<&'static OsStr, OsString> = std::iter::IntoIterator::into_iter([
+            (
+                MX_TEST_SYNAPSE_DIR.as_os_str(),
+                synapse_root.as_os_str().into(),
+            ),
+            (
+                MX_TEST_SCRIPT_TMPDIR.as_os_str(),
+                script_tmpdir.as_os_str().into(),
+            ),
+            (MX_TEST_CWD.as_os_str(), curdir.as_os_str().into()),
+            (MX_TEST_NETWORK_NAME.as_os_str(), self.network().into()),
+            (
+                MX_TEST_SETUP_CONTAINER_NAME.as_os_str(),
+                self.setup_container_name().into(),
+            ),
+            (
+                MX_TEST_UP_RUN_DOWN_CONTAINER_NAME.as_os_str(),
+                self.run_container_name().into(),
+            ),
+        ])
+        .chain(
+            if self.workers.enabled {
+                Some((MX_TEST_WORKERS_ENABLED.as_os_str(), "true".into()))
+            } else {
+                None
+            }
+            .into_iter(),
+        )
+        .collect();
         Ok(env)
     }
 
     /// Patch the homeserver.yaml at the given path (usually one that has been generated by synapse)
     /// with the properties in this struct (which will usually have been provided from mx-tester.yaml)
+    ///
+    /// In multiple workers mode, also patch the worker files.
     pub fn patch_homeserver_config(&self) -> Result<(), Error> {
         use serde_yaml::{Mapping, Value as YAML};
+        const LISTENERS: &str = "listeners";
+        const MODULES: &str = "modules";
+
         let target_path = self.synapse_root().join("data").join("homeserver.yaml");
         debug!("Attempting to open {:#?}", target_path);
         let config_file = std::fs::File::open(&target_path)
@@ -264,77 +371,174 @@ impl Config {
         let mut combined_config: Mapping = serde_yaml::from_reader(config_file)
             .context("The homeserver.yaml generated by synapse is invalid")?;
 
-        let mut insert_value = |key: &str, value: &str| {
-            combined_config.insert(YAML::from(key), YAML::from(value));
-        };
-        insert_value("public_baseurl", &self.homeserver.public_baseurl);
-        insert_value("server_name", &self.homeserver.server_name);
-        insert_value(
-            "registration_shared_secret",
-            &self.homeserver.registration_shared_secret,
+        for (key, value) in [
+            ("public_baseurl", &self.homeserver.public_baseurl),
+            ("server_name", &self.homeserver.server_name),
+            (
+                "registration_shared_secret",
+                &self.homeserver.registration_shared_secret,
+            ),
+        ] {
+            combined_config.insert(key.into(), value.to_string().into());
+        }
+        combined_config.insert(
+            "enable_registration_without_verification".into(),
+            true.into(),
         );
 
-        // HACK: Unless we're already overwriting listeners, patch `listeners`
-        // to make sure it listens on the ports specified in `docker_config`.
-        if self.homeserver.extra_fields.get("listeners").is_none() {
-            if let Some(listeners) = combined_config.get_mut(&YAML::from("listeners")) {
-                let listeners = listeners
-                    .as_sequence_mut()
-                    .ok_or_else(|| anyhow!("`listeners` should be a sequence"))?;
-                debug!("Listeners: {:#?}", listeners);
-
-                // FIXME: For the time being, let's only handle the simplest case.
-                // If we're lucky, we'll be able to find WTH is going on that causes
-                // Synapse to default to 9599 despite the fact that we're specifying 8008
-                // everywhere.
-                for listener in listeners {
-                    let port = listener["port"]
-                        .as_u64()
-                        .ok_or_else(|| anyhow!("`listeners::port` should be a number"))?;
-                    let found = self
-                        .docker
-                        .port_mapping
-                        .iter()
-                        .any(|mapping| mapping.guest as u64 == port);
-                    if !found {
-                        warn!("the generated dockerfile specifies port {}, but that port isn't opened", port);
-                        warn!(
-                            "replacing with port {} (mapped to {})",
-                            self.docker.port_mapping[0].guest, self.docker.port_mapping[0].host
-                        );
-                        listener["port"] = self.docker.port_mapping[0].guest.into()
-                    }
-                }
-            }
-        }
-
         // Copy extra fields.
+        // Note: This may include `modules` or `listeners`.
         for (key, value) in &self.homeserver.extra_fields {
             combined_config.insert(YAML::from(key.clone()), value.clone());
         }
 
-        // Copy modules config.
-        let modules_key = "modules".into();
-        if !combined_config.contains_key(&modules_key)
-            || combined_config.get(&modules_key).unwrap().is_null()
-        {
-            combined_config.insert(modules_key.clone(), YAML::Sequence(vec![]));
+        // Make sure that we listen on the appropriate port.
+        // For some reason, `start.py generate` tends to put port 4153 instead of HARDCODED_GUEST_PORT.
+        let listeners = combined_config
+            .entry(LISTENERS.into())
+            .or_insert_with(|| yaml!([]));
+        *listeners = yaml!([yaml!({
+            "port" => if self.workers.enabled { HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT } else { HARDCODED_GUEST_PORT },
+            "tls" => false,
+            "type" => "http",
+            "bind_addresses" => yaml!(["::"]),
+            "x_forwarded" => false,
+            "resources" => yaml!([
+                yaml!({
+                    "names" => yaml!(["client"]),
+                    "compress" => true
+                }),
+                yaml!({
+                    "names" => yaml!(["federation"]),
+                    "compress" => false
+                })
+            ]),
+        })]);
+        if self.workers.enabled {
+            // Setup the replication port.
+            listeners
+                .as_sequence_mut()
+                .unwrap() // We just set it up as a sequence
+                .push(yaml!({
+                    "port" => 9093,
+                        "bind_address" => "127.0.0.1",
+                        "type" => "http",
+                        "resources" => yaml!([
+                            yaml!({
+                                "names" => yaml!(["replication"])
+                            })
+                        ])
+                }));
         }
+
+        // Copy modules config.
         let modules_root = combined_config
-            .get_mut(&modules_key)
-            .unwrap() // Checked above
-            .as_sequence_mut()
+            .entry(MODULES.into())
+            .or_insert_with(|| yaml!([]))
+            .to_seq_mut()
             .ok_or_else(|| anyhow!("In homeserver.yaml, expected a sequence for key `modules`"))?;
         for module in &self.modules {
             modules_root.push(module.config.clone());
         }
-        let mut config_writer = LineWriter::new(std::fs::File::create(&target_path)?);
-        config_writer
-            .write_all(
-                &serde_yaml::to_vec(&combined_config)
-                    .context("Could not serialize combined homeserver config")?,
-            )
+
+        if self.workers.enabled {
+            for (key, value) in std::iter::IntoIterator::into_iter([
+                // No worker support without redis.
+                (
+                    "redis",
+                    yaml!({
+                        "enabled" => true,
+                    }),
+                ),
+                // No worker support without postgresql
+                (
+                    "database",
+                    yaml!({
+                        "name" => "psycopg2",
+                        "txn_limit" => 10_000,
+                        "args" => yaml!({
+                            "user" => "synapse",
+                            "password" => "password",
+                            "host" => "localhost",
+                            "port" => 5432,
+                            "cp_min" => 5,
+                            "cp_max" => 10
+                        })
+                    }),
+                ),
+                // Deactivate a few features in the main process
+                // and let a worker take over them.
+                ("notify_appservices", yaml!(false)),
+                ("send_federation", yaml!(false)),
+                ("update_user_directory", yaml!(false)),
+                ("start_pushers", yaml!(false)),
+                ("url_preview_enabled", yaml!(false)),
+                (
+                    "url_preview_ip_range_blacklist",
+                    yaml!(["255.255.255.255/32",]),
+                ),
+                // Also, let's get rid of that warning, it pollutes logs.
+                ("suppress_key_server_warning", yaml!(true)),
+            ]) {
+                combined_config.insert(yaml!(key), value);
+            }
+
+            // Patch shared worker config (generated by workers_start.py) to inject modules into all workers.
+            //
+            // Note: In future versions, we might decide to only patch specific workers.
+            let conf_path = self.synapse_workers_dir().join("shared.yaml");
+            let conf_file = std::fs::File::open(&conf_path).with_context(|| {
+                format!("Could not open workers shared config: {:?}", conf_path)
+            })?;
+            let mut config: serde_yaml::Mapping = serde_yaml::from_reader(&conf_file)
+                .with_context(|| {
+                    format!("Could not parse workers shared config: {:?}", conf_path)
+                })?;
+
+            let modules_root = config
+                .entry(MODULES.into())
+                .or_insert_with(|| yaml!([]))
+                .to_seq_mut()
+                .ok_or_else(|| anyhow!("In shared.yaml, expected a sequence for key `modules`"))?;
+            for module in &self.modules {
+                modules_root.push(module.config.clone());
+            }
+
+            for (key, value) in std::iter::IntoIterator::into_iter([
+                // Disable url_preview_enabled.
+                ("url_preview_enabled", yaml!(false)),
+                (
+                    "url_preview_ip_range_blacklist",
+                    yaml!(["255.255.255.255/32"]),
+                ),
+                // No worker without postgres.
+                (
+                    "database",
+                    yaml!({
+                        "name" => "psycopg2",
+                        "txn_limit" => 10_000,
+                        "args" => yaml!({
+                            "user" => "synapse",
+                            "password" => "password",
+                            "host" => "localhost",
+                            "port" => 5432,
+                            "cp_min" => 5,
+                            "cp_max" => 10
+                        })
+                    }),
+                ),
+            ]) {
+                config.insert(yaml!(key), value);
+            }
+
+            // Deactivate url preview
+            serde_yaml::to_writer(std::fs::File::create(&conf_path)?, &combined_config)
+                .context("Could not write workers shared config")?;
+        }
+
+        serde_yaml::to_writer(std::fs::File::create(&target_path)?, &combined_config)
             .context("Could not write combined homeserver config")?;
+
         Ok(())
     }
 
@@ -345,34 +549,71 @@ impl Config {
         self.directories.root.join(&self.name)
     }
 
-    /// The directory in which we're putting synapse data for this test.
-    ///
-    /// It will contain, among other things, the logs for the test.
+    /// The directory in which we're putting everything related to synapse data for this test.
     pub fn synapse_root(&self) -> PathBuf {
         self.test_root().join("synapse")
+    }
+
+    /// The directory in which Synapse may write data.
+    pub fn synapse_data_dir(&self) -> PathBuf {
+        self.synapse_root().join("data")
+    }
+
+    /// The directory in which we're putting the configuration of workers for this test.
+    pub fn synapse_workers_dir(&self) -> PathBuf {
+        self.synapse_root().join("workers")
+    }
+
+    /// The directory in which we're putting files that go to subdirectories of /etc in
+    /// in the guest.
+    pub fn etc_dir(&self) -> PathBuf {
+        self.test_root().join("etc")
+    }
+
+    /// The directory in which we publish logs.
+    pub fn logs_dir(&self) -> PathBuf {
+        self.test_root().join("logs")
+    }
+
+    pub fn scripts_logs_dir(&self) -> PathBuf {
+        self.logs_dir().join("mx-tester")
     }
 
     /// A tag for the Docker image we're creating/using.
     pub fn tag(&self) -> String {
         match self.synapse {
             SynapseVersion::Docker { ref tag } => {
-                format!("mx-tester-synapse-{}-{}", tag, self.name)
+                format!(
+                    "mx-tester-synapse-{}-{}{workers}",
+                    tag,
+                    self.name,
+                    workers = if self.workers.enabled { "-workers" } else { "" }
+                )
             }
         }
     }
 
+    /// A name for the network we're creating/using.
     pub fn network(&self) -> String {
-        self.tag()
+        format!("net-{}", self.tag())
     }
 
     /// The name for the container we're using to setup Synapse.
     pub fn setup_container_name(&self) -> String {
-        format!("mx-tester-synapse-setup-{}", self.name)
+        format!(
+            "mx-tester-synapse-setup-{}{}",
+            self.name,
+            if self.workers.enabled { "-workers" } else { "" }
+        )
     }
 
     /// The name for the container we're using to actually run Synapse.
     pub fn run_container_name(&self) -> String {
-        format!("mx-tester-synapse-run-{}", self.name)
+        format!(
+            "mx-tester-synapse-run-{}{}",
+            self.name,
+            if self.workers.enabled { "-workers" } else { "" }
+        )
     }
 }
 
@@ -435,20 +676,34 @@ pub struct Script {
     lines: Vec<String>,
 }
 impl Script {
-    pub fn run(&self, env: &HashMap<&'static OsStr, OsString>) -> Result<(), Error> {
+    pub async fn run(
+        &self,
+        stage: &'static str,
+        log_dir: &PathBuf,
+        env: &HashMap<&'static OsStr, OsString>,
+    ) -> Result<(), Error> {
         debug!("Running with environment variables {:#?}", env);
+        println!(
+            "** running {} script. See stdout and stderr captures in {:?}",
+            stage,
+            log_dir.join(stage)
+        );
+        let _ = std::fs::remove_dir(log_dir.join(stage).as_path().with_extension("log"));
+        let _ = std::fs::remove_dir(log_dir.join(stage).as_path().with_extension("out"));
+        let executor = Executor::try_new().context("Cannot instantiate executor")?;
         for line in &self.lines {
-            let mut exec = ezexec::ExecBuilder::with_shell(line).map_err(|err| {
-                anyhow!("Could not interpret `{}` as shell script: {}", line, err)
-            })?;
-            for (key, val) in env {
-                exec.set_env(key, val);
-            }
-            exec.spawn_transparent()
-                .map_err(|err| anyhow!("Error executing `{}`: {}", line, err))?
-                .wait()
-                .map_err(|err| anyhow!("Error during `{}`: {}", line, err))?;
+            println!("*** {}", line);
+            let mut command = executor
+                .command(line)
+                .with_context(|| format!("Could not interpret `{}` as shell script", line))?;
+            command.envs(env);
+            debug!("Running command {:?}", command);
+            command
+                .spawn_logged(log_dir, stage, line)
+                .await
+                .with_context(|| format!("Error within line {line}"))?;
         }
+        println!("** running {} script success", stage);
         Ok(())
     }
 }
@@ -533,147 +788,167 @@ pub struct DownScript {
 async fn start_synapse_container(
     docker: &Docker,
     config: &Config,
-    data_dir: &Path,
     container_name: &str,
     cmd: Vec<String>,
     detach: bool,
 ) -> Result<(), Error> {
-    let is_container_created = docker.is_container_created(container_name).await?;
+    let data_dir = config.synapse_data_dir();
+    let data_dir = data_dir.as_path();
 
-    let env = vec![
+    let mut env = vec![
         format!("SYNAPSE_SERVER_NAME={}", config.homeserver.server_name),
         "SYNAPSE_REPORT_STATS=no".into(),
         "SYNAPSE_CONFIG_DIR=/data".into(),
         format!(
             "SYNAPSE_HTTP_PORT={}",
-            config
-                .docker
-                .port_mapping
-                .get(0)
-                .ok_or_else(|| anyhow!("In mx-tester.yml, an empty port mapping was specified"))?
-                .guest
+            if config.workers.enabled {
+                HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT
+            } else {
+                HARDCODED_GUEST_PORT
+            }
         ),
     ];
+    if config.workers.enabled {
+        // The list of workers to launch, as copied from Complement.
+        // It has two instances of `event_persister` by design, in order
+        // to launch two event persisters.
+        env.push("SYNAPSE_WORKER_TYPES=event_persister, event_persister, background_worker, frontend_proxy, event_creator, user_dir, media_repository, federation_inbound, federation_reader, federation_sender, synchrotron, appservice, pusher".to_string());
+        env.push("SYNAPSE_WORKERS_WRITE_LOGS_TO_DISK=1".to_string());
+    }
+    let env = env;
+    debug!("We need to create container for {}", container_name);
 
-    if is_container_created {
-        debug!("NO need to create container for {}", container_name);
-    } else {
-        debug!("We need to create container for {}", container_name);
-
-        // Generate configuration to open and map ports.
-        let host_port_bindings = config
-            .docker
-            .port_mapping
-            .iter()
-            .map(|mapping| {
-                (
-                    format!("{}/tcp", mapping.guest),
-                    Some(vec![PortBinding {
-                        host_port: Some(format!("{}", mapping.host)),
-                        ..PortBinding::default()
-                    }]),
-                )
-            })
-            .collect();
-        let exposed_ports = config
-            .docker
-            .port_mapping
-            .iter()
-            .map(|mapping| (format!("{}/tcp", mapping.guest), HashMap::new()))
-            .collect();
-        debug!("port_bindings: {:#?}", host_port_bindings);
-
-        debug!(
-            "containers: {:#?}",
-            docker
-                .list_containers(None::<ListContainersOptions<String>>)
-                .await?
+    // Generate configuration to open and map ports.
+    let mut host_port_bindings = HashMap::new();
+    let mut exposed_ports = HashMap::new();
+    for mapping in config.docker.port_mapping.iter().chain(
+        [PortMapping {
+            host: config.homeserver.host_port,
+            guest: HARDCODED_GUEST_PORT,
+        }]
+        .iter(),
+    ) {
+        let key = format!("{}/tcp", mapping.guest);
+        host_port_bindings.insert(
+            key.clone(),
+            Some(vec![PortBinding {
+                host_port: Some(format!("{}", mapping.host)),
+                ..PortBinding::default()
+            }]),
         );
-        assert!(std::fs::metadata(data_dir).is_ok());
+        exposed_ports.insert(key.clone(), HashMap::new());
+    }
+    debug!("port_bindings: {:#?}", host_port_bindings);
 
-        debug!("Creating container {}", container_name);
-        let response = docker
-            .create_container(
-                Some(CreateContainerOptions {
-                    name: container_name,
-                }),
-                BollardContainerConfig {
-                    env: Some(env.clone()),
-                    exposed_ports: Some(exposed_ports),
-                    hostname: Some(config.docker.hostname.clone()),
-                    host_config: Some(HostConfig {
-                        log_config: Some(HostConfigLogConfig {
-                            typ: Some("json-file".to_string()),
-                            config: None,
-                        }),
-                        // Synapse has a tendency to not start correctly
-                        // or to stop shortly after startup. The following
-                        // restart policy seems to help a lot.
-                        restart_policy: Some(RestartPolicy {
-                            name: Some(RestartPolicyNameEnum::ON_FAILURE),
-                            maximum_retry_count: Some(MAX_SYNAPSE_RESTART_COUNT),
-                        }),
-                        // Extremely large memory allowance.
-                        memory_reservation: Some(MEMORY_ALLOCATION_BYTES),
-                        memory_swap: Some(-1),
-                        // Mount guest directory `/data` into the host synapse data directory.
-                        binds: Some(vec![format!(
-                            "{}:/data:rw",
-                            data_dir.as_os_str().to_string_lossy()
-                        )]),
-                        // Expose guest port `guest_mapping` as `host_mapping`.
-                        port_bindings: Some(host_port_bindings),
-                        // Enable access to host as `host.docker.internal` from the guest.
-                        // On macOS and Windows, this is expected to be transparent but
-                        // on Linux, an option needs to be added.
-                        #[cfg(target_os = "linux")]
-                        extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
-                        ..HostConfig::default()
-                    }),
-                    image: Some(config.tag()),
-                    attach_stderr: Some(true),
-                    attach_stdout: Some(true),
-                    attach_stdin: Some(false),
-                    cmd: Some(cmd.clone()),
-                    // Specify that `/data` may be mounted.
-                    // The empty hashmap... is an oddity of the Docker Engine API.
-                    volumes: Some(
-                        vec![("/data".to_string(), HashMap::new())]
-                            .into_iter()
-                            .collect(),
-                    ),
-                    tty: Some(false),
-                    #[cfg(unix)]
-                    user: Some(format!("{}", nix::unistd::getuid())),
-                    ..BollardContainerConfig::default()
-                },
-            )
-            .await
-            .context("Failed to build container")?;
-
-        // For debugging purposes, try and find out when/why the container stops.
-        let mut wait = docker.wait_container(
-            container_name,
-            Some(WaitContainerOptions {
-                condition: "not-running",
+    debug!("Creating container {}", container_name);
+    let response = docker
+        .create_container(
+            Some(CreateContainerOptions {
+                name: container_name,
             }),
-        );
-        {
-            let container_name = container_name.to_string();
-            tokio::task::spawn(async move {
-                debug!(target: "mx-tester-wait", "{} Container started", container_name);
-                while let Some(next) = wait.next().await {
-                    let response = next.context("Error while waiting for container to stop")?;
-                    debug!(target: "mx-tester-wait", "{} {:#?}", container_name, response);
-                }
-                debug!(target: "mx-tester-wait", "{} Container is now down", container_name);
-                Ok::<(), Error>(())
-            });
-        }
+            BollardContainerConfig {
+                env: Some(env.clone()),
+                exposed_ports: Some(exposed_ports),
+                hostname: Some(config.docker.hostname.clone()),
+                host_config: Some(HostConfig {
+                    log_config: Some(HostConfigLogConfig {
+                        typ: Some("json-file".to_string()),
+                        config: None,
+                    }),
+                    // Synapse has a tendency to not start correctly
+                    // or to stop shortly after startup. The following
+                    // restart policy seems to help a lot.
+                    restart_policy: Some(RestartPolicy {
+                        name: Some(RestartPolicyNameEnum::ON_FAILURE),
+                        maximum_retry_count: Some(MAX_SYNAPSE_RESTART_COUNT),
+                    }),
+                    // Extremely large memory allowance.
+                    memory_reservation: Some(MEMORY_ALLOCATION_BYTES),
+                    memory_swap: Some(-1),
+                    // Mount guest directories as host directories.
+                    binds: Some(vec![
+                        // Synapse logs, etc.
+                        format!("{}:/data:rw", data_dir.as_os_str().to_string_lossy()),
+                        // Everything below this point is for workers.
+                        format!(
+                            "{}:/conf/workers:rw",
+                            config.synapse_workers_dir().to_string_lossy()
+                        ),
+                        format!(
+                            "{}:/etc/nginx/conf.d:rw",
+                            config.etc_dir().join("nginx").to_string_lossy()
+                        ),
+                        format!(
+                            "{}:/etc/supervisor/conf.d:rw",
+                            config.etc_dir().join("supervisor").to_string_lossy()
+                        ),
+                        format!(
+                            "{}:/var/log/nginx:rw",
+                            config.logs_dir().join("nginx").to_string_lossy()
+                        ),
+                        format!(
+                            "{}:/var/log/workers:rw",
+                            config.logs_dir().join("workers").to_string_lossy()
+                        ),
+                    ]),
+                    // Expose guest port `guest_mapping` as `host_mapping`.
+                    port_bindings: Some(host_port_bindings),
+                    // Enable access to host as `host.docker.internal` from the guest.
+                    // On macOS and Windows, this is expected to be transparent but
+                    // on Linux, an option needs to be added.
+                    #[cfg(target_os = "linux")]
+                    extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
+                    ..HostConfig::default()
+                }),
+                image: Some(config.tag()),
+                attach_stderr: Some(true),
+                attach_stdout: Some(true),
+                attach_stdin: Some(false),
+                cmd: Some(cmd.clone()),
+                // Specify that a few directories may be mounted.
+                // The empty hashmap... is an oddity of the Docker Engine API.
+                volumes: Some(
+                    vec![
+                        ("/data".to_string(), HashMap::new()),
+                        ("/conf/workers".to_string(), HashMap::new()),
+                        ("/etc/nginx/conf.d".to_string(), HashMap::new()),
+                        ("/etc/supervisor/conf.d".to_string(), HashMap::new()),
+                        ("/var/log/workers".to_string(), HashMap::new()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                tty: Some(false),
+                #[cfg(unix)]
+                user: Some(format!("{}", nix::unistd::getuid())),
+                ..BollardContainerConfig::default()
+            },
+        )
+        .await
+        .context("Failed to build container")?;
 
-        for warning in response.warnings {
-            warn!(target: "creating-container", "{}", warning);
-        }
+    // For debugging purposes, try and find out when/why the container stops.
+    let mut wait = docker.wait_container(
+        container_name,
+        Some(WaitContainerOptions {
+            condition: "not-running",
+        }),
+    );
+    {
+        let container_name = container_name.to_string();
+        tokio::task::spawn(async move {
+            debug!(target: "mx-tester-wait", "{} Container started", container_name);
+            while let Some(next) = wait.next().await {
+                let response = next.context("Error while waiting for container to stop")?;
+                debug!(target: "mx-tester-wait", "{} {:#?}", container_name, response);
+            }
+            debug!(target: "mx-tester-wait", "{} Container is now down", container_name);
+            Ok::<(), Error>(())
+        });
+    }
+
+    for warning in response.warnings {
+        warn!(target: "creating-container", "{}", warning);
     }
 
     // ... add the container to the network.
@@ -706,27 +981,30 @@ async fn start_synapse_container(
         );
 
         // Write logs to the synapse data directory.
-
-        let mut log_file = tokio::fs::OpenOptions::new()
+        let log_file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(data_dir.join(format!("mx-tester-{}.log", container_name)))
+            .open(config.logs_dir().join("docker").join(format!(
+                "{}.log",
+                if detach { "up-run-down" } else { "build" }
+            )))
             .await?;
+        let mut buffer = BufWriter::new(log_file);
         tokio::task::spawn(async move {
             debug!(target: "mx-tester-log", "Starting log watcher");
             while let Some(next) = logs.next().await {
                 match next {
                     Ok(content) => {
                         debug!(target: "mx-tester-log", "{}", content);
-                        log_file
-                            .write_all(format!("{}", content).as_bytes())
-                            .await?;
+                        buffer.write_all(format!("{}", content).as_bytes()).await?;
+                        buffer.flush().await?;
                     }
                     Err(err) => {
                         error!(target: "mx-tester-log", "{}", err);
-                        log_file
+                        buffer
                             .write_all(format!("ERROR: {}", err).as_bytes())
                             .await?;
+                        buffer.flush().await?;
                         return Err(err).context("Error in log");
                     }
                 }
@@ -736,6 +1014,11 @@ async fn start_synapse_container(
         });
     }
 
+    let cleanup = if config.autoclean_on_error {
+        Some(Cleanup::new(config))
+    } else {
+        None
+    };
     let exec = docker
         .create_exec(
             container_name,
@@ -755,11 +1038,15 @@ async fn start_synapse_container(
         .context("Error starting Synapse container")?;
 
     if !detach {
-        let mut log_file = tokio::fs::OpenOptions::new()
+        let log_file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(data_dir.join(format!("mx-tester-{}.out.log", container_name)))
+            .open(config.logs_dir().join("docker").join(format!(
+                "{}.out",
+                if detach { "up-run-down" } else { "build" }
+            )))
             .await?;
+        let mut buffer = BufWriter::new(log_file);
         tokio::task::spawn(async move {
             debug!(target: "synapse", "Launching Synapse container");
             match execution {
@@ -770,7 +1057,8 @@ async fn start_synapse_container(
                     while let Some(data) = output.next().await {
                         let output = data.context("Error during run")?;
                         debug!(target: "synapse", "{}", output);
-                        log_file.write_all(format!("{}", output).as_bytes()).await?
+                        buffer.write_all(format!("{}", output).as_bytes()).await?;
+                        buffer.flush().await?;
                     }
                 }
                 bollard::exec::StartExecResults::Detached => panic!(),
@@ -780,7 +1068,7 @@ async fn start_synapse_container(
         })
         .await??;
     }
-
+    cleanup.disarm();
     Ok(())
 }
 
@@ -793,6 +1081,8 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     let setup_container_name = config.setup_container_name();
     let run_container_name = config.run_container_name();
 
+    println!("\n* build step: starting");
+
     // Remove any trace of a previous build. Ignore failures.
     let _ = docker.stop_container(&run_container_name, None).await;
     let _ = docker.remove_container(&run_container_name, None).await;
@@ -802,11 +1092,25 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
 
     let synapse_root = config.synapse_root();
     let _ = std::fs::remove_dir_all(config.test_root());
-    std::fs::create_dir_all(&synapse_root)
-        .with_context(|| format!("Could not create directory {:#?}", synapse_root,))?;
+    let modules_log_dir = config.scripts_logs_dir().join("modules");
+    for dir in &[
+        &config.synapse_data_dir(),
+        &config.synapse_workers_dir(),
+        &config.etc_dir().join("nginx"),
+        &config.etc_dir().join("supervisor"),
+        &config.logs_dir().join("docker"),
+        &config.logs_dir().join("nginx"),
+        &config.logs_dir().join("workers"),
+        &modules_log_dir,
+    ] {
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Could not create directory {:#?}", dir,))?;
+    }
 
     // Build modules
+    println!("** building modules");
     let mut env = config.shared_env_variables()?;
+
     for module in &config.modules {
         let path = synapse_root.join(&module.name);
         env.insert(&*MX_TEST_MODULE_DIR, path.as_os_str().into());
@@ -814,11 +1118,63 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
             "Calling build script for module {} with MX_TEST_DIR={:#?}",
             &module.name, path
         );
+        let log_dir = modules_log_dir.join(&module.name);
+        std::fs::create_dir_all(&log_dir)
+            .with_context(|| format!("Could not create directory {:#?}", log_dir,))?;
         module
             .build
-            .run(&env)
+            .run("build", &log_dir, &env)
+            .await
             .context("Error running build script")?;
         debug!("Completed one module.");
+    }
+    println!("** building modules success");
+
+    // Prepare resource files.
+    if config.workers.enabled {
+        let conf_dir = synapse_root.join("conf");
+        std::fs::create_dir_all(&conf_dir)
+            .context("Could not create directory for worker configuration file")?;
+        let data = [
+            // These files are used by `workers_start.py` to generate worker configuration.
+            // They have been copied manually from Synapse's git repo.
+            // Hopefully, in the future, Synapse+worker images will be available on DockerHub.
+            (
+                conf_dir.join("worker.yaml.j2"),
+                include_str!("../res/workers/worker.yaml.j2"),
+            ),
+            (
+                conf_dir.join("shared.yaml.j2"),
+                include_str!("../res/workers/shared.yaml.j2"),
+            ),
+            (
+                conf_dir.join("supervisord.conf.j2"),
+                include_str!("../res/workers/supervisord.conf.j2"),
+            ),
+            (
+                conf_dir.join("nginx.conf.j2"),
+                include_str!("../res/workers/nginx.conf.j2"),
+            ),
+            (
+                conf_dir.join("log.config"),
+                include_str!("../res/workers/log.config"),
+            ),
+            // workers_start.py is adapted from Synapse's git repo.
+            (
+                synapse_root.join("workers_start.py"),
+                include_str!("../res/workers/workers_start.py"),
+            ),
+            // setup postgres user and database
+            (
+                conf_dir.join("postgres.sql"),
+                include_str!("../res/workers/postgres.sql"),
+            ),
+        ];
+        for (path, content) in &data {
+            std::fs::write(&path, content).with_context(|| {
+                format!("Could not inject worker configuration file {:?}", path)
+            })?;
+        }
     }
 
     // Prepare Dockerfile including modules.
@@ -827,18 +1183,33 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
 
 FROM {docker_tag}
 
+VOLUME [\"/data\", \"/conf/workers\", \"/etc/nginx/conf.d\", \"/etc/supervisor/conf.d\", \"/var/log/workers\"]
+
+# We're not running as root, to avoid messing up with the host
+# filesystem, so we need a proper user. We give it the current
+# use's uid to make sure that files written by this Docker image
+# can be read and removed by the host's user.
+# Note that we need tty to workaround the following Docker issue:
+# https://github.com/moby/moby/issues/31243#issuecomment-406825071
+RUN useradd mx-tester {maybe_uid} --groups sudo,tty
+
+# Add a password, to be able to run sudo. We'll use it to
+# chmod files.
+RUN echo \"mx-tester:password\" | chpasswd
+
 # Show the Synapse version, to aid with debugging.
 RUN pip show matrix-synapse
+
+{maybe_setup_workers}
 
 # Copy and install custom modules.
 RUN mkdir /mx-tester
 {setup}
 {copy}
 
-VOLUME [\"/data\"]
 ENTRYPOINT []
-ENV SYNAPSE_HTTP_PORT=8008
-EXPOSE 8008/tcp 8009/tcp 8448/tcp
+
+EXPOSE {synapse_http_port}/tcp 8009/tcp 8448/tcp
 ",
     docker_tag = docker_tag,
     setup = config.modules.iter()
@@ -848,6 +1219,42 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
         // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
         .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
         .format("\n"),
+    maybe_uid = {
+        let my_uid = nix::unistd::getuid();
+        if my_uid != nix::unistd::ROOT {
+           // We're running mx-tester as a regular user.
+            // Docker/Synapse should be executed as the same user, otherwise we won't be
+            // able to look at or remove all the files created by them.
+            Cow::from(format!("--uid {}", my_uid))
+        } else {
+            // We're running mx-tester as root.
+            // This can happen in CI, for instance.
+            // In this case, let `useradd` pick a uid for our user. We can't use
+            // the root uid as it's already taken by root in the guest environment
+            // and any uid will do since we're root in the host environment anyway,
+            // so we can look at and remove any file created by other users.
+            Cow::from("")
+        }
+    },
+    synapse_http_port = HARDCODED_GUEST_PORT,
+    maybe_setup_workers =
+    if config.workers.enabled {
+"
+# Install dependencies
+RUN apt-get update && apt-get install -y postgresql postgresql-client-13 supervisor redis nginx sudo lsof
+
+# For workers, we're not using start.py but workers_start.py
+# (which does call start.py, but that's a long story).
+COPY workers_start.py /workers_start.py
+COPY conf/* /conf/
+
+# We're not going to be running workers_start.py as root, so
+# let's make sure that it *can* run, write to /etc/nginx & co.
+RUN chmod ugo+rx /workers_start.py && chown mx-tester /workers_start.py
+"
+    } else {
+        ""
+    }
     );
     debug!("dockerfile {}", dockerfile_content);
 
@@ -864,7 +1271,7 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
         let tar_path = docker_dir_path.join("docker.tar");
         {
             let tar_file = std::fs::File::create(&tar_path)?;
-            let mut tar_builder = tar::Builder::new(tar_file);
+            let mut tar_builder = tar::Builder::new(std::io::BufWriter::new(tar_file));
             debug!("tar: adding directory {:#?}", synapse_root);
             tar_builder.append_dir_all("", &synapse_root)?;
             tar_builder.finish()?;
@@ -874,14 +1281,21 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
         let stream = FramedRead::new(tar_file, BytesCodec::new());
         hyper::Body::wrap_stream(stream)
     };
+    let logs_path = config.logs_dir().join("docker").join("build.log");
+    println!(
+        "** building Docker image. Logs will be stored at {:?}",
+        logs_path
+    );
     debug!("Building image with tag {}", config.tag());
     {
+        let mut log =
+            std::fs::File::create(logs_path).context("Could not create docker build logs")?;
         let mut stream = docker.build_image(
             bollard::image::BuildImageOptions {
                 pull: true,
                 nocache: true,
                 t: config.tag(),
-                q: true,
+                q: false,
                 rm: true,
                 ..Default::default()
             },
@@ -895,16 +1309,19 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
         while let Some(result) = stream.next().await {
             let info = result.context("Daemon `docker build` indicated an error")?;
             if let Some(ref error) = info.error {
-                return Err(anyhow!(
-                    "Error while building an image {}: {:#?}",
-                    error,
-                    info.error_detail
-                ));
+                return Err(anyhow!("Error while building an image: {}", error,));
             }
-            debug!("Build image progress {:#?}", info);
+            if let Some(ref progress) = info.progress {
+                debug!("Build image progress {:#?}", info);
+                log.write_all(progress.as_bytes())
+                    .context("Could not write docker build logs")?;
+            }
         }
     }
     debug!("Image built");
+    println!("** building Docker image success");
+
+    println!("* build step: success");
     Ok(())
 }
 
@@ -912,7 +1329,13 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
 pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     // This will break (on purpose) once we extend `SynapseVersion`.
     let SynapseVersion::Docker { .. } = config.synapse;
+    let cleanup = if config.autoclean_on_error {
+        Some(Cleanup::new(config))
+    } else {
+        None
+    };
 
+    println!("\n* up step: starting");
     // Create the network if necessary.
     // We'll add the container once it's available.
     let network_name = config.network();
@@ -921,7 +1344,9 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         debug!("Creating network {}", network_name);
         docker
             .create_network(CreateNetworkOptions {
-                name: network_name.as_str(),
+                name: Cow::from(network_name.as_str()),
+                check_duplicate: true,
+                attachable: true,
                 ..CreateNetworkOptions::default()
             })
             .await?;
@@ -929,13 +1354,18 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
             docker.is_network_up(&network_name).await?,
             "The network should now be up"
         );
+        debug!("Network is now up");
     } else {
+        // This can happen for instance if a script needs to
+        // spawn another image on the same network and creates
+        // that network manually.
         debug!("Network {} already exists", network_name);
     }
 
     // Only execute the `up` script once the network is up,
     // in case we want to e.g. bring up images that need
     // that same network.
+    let script_log_dir = config.scripts_logs_dir();
     match config.up {
         Some(UpScript::FullUpScript(FullUpScript {
             before: Some(ref script),
@@ -944,7 +1374,8 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         | Some(UpScript::SimpleScript(ref script)) => {
             let env = config.shared_env_variables()?;
             script
-                .run(&env)
+                .run("up", &script_log_dir, &env)
+                .await
                 .context("Error running `up` script (before)")?;
         }
         _ => {}
@@ -955,7 +1386,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
 
     // Create the synapse data directory.
     // We'll use it as volume.
-    let synapse_data_directory = config.synapse_root().join("data");
+    let synapse_data_directory = config.synapse_data_dir();
     std::fs::create_dir_all(&synapse_data_directory)
         .with_context(|| format!("Cannot create directory {:#?}", synapse_data_directory))?;
 
@@ -967,9 +1398,12 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     start_synapse_container(
         docker,
         config,
-        &synapse_data_directory,
         &setup_container_name,
-        vec!["/start.py".to_string(), "generate".to_string()],
+        if config.workers.enabled {
+            vec!["/workers_start.py".to_string(), "generate".to_string()]
+        } else {
+            vec!["/start.py".to_string(), "generate".to_string()]
+        },
         false,
     )
     .await
@@ -983,6 +1417,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     debug!("done generating");
     let _ = docker.stop_container(&setup_container_name, None).await;
     let _ = docker.remove_container(&setup_container_name, None).await;
+    docker.wait_container_removed(&setup_container_name).await?;
 
     debug!("Updating homeserver.yaml");
     // Apply config from mx-tester.yml to the homeserver.yaml that was just created
@@ -1000,20 +1435,20 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         );
         tokio::time::sleep(std::time::Duration::new(5, 0)).await;
     }
-    while let Some(mapping) = config.docker.port_mapping.iter().find(|mapping| {
-        debug!("Checking whether port {} is available", mapping.host);
-        std::net::TcpListener::bind(("127.0.0.1", mapping.host as u16)).is_err()
-    }) {
-        debug!("Waiting until port {} is available", mapping.host);
-        tokio::time::sleep(std::time::Duration::new(5, 0)).await;
-    }
-    debug!("Port is available, proceeding");
+
+    println!(
+        "** starting Synapse. Logs will be stored at {:?}",
+        config.logs_dir().join("docker").join("up-run-down.log")
+    );
     start_synapse_container(
         docker,
         config,
-        &synapse_data_directory,
         &run_container_name,
-        vec!["/start.py".to_string()],
+        if config.workers.enabled {
+            vec!["/workers_start.py".to_string(), "start".to_string()]
+        } else {
+            vec!["/start.py".to_string()]
+        },
         true,
     )
     .await
@@ -1027,28 +1462,31 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     // above works. If it doesn't, we can still have a case in which Synapse won't start,
     // causing `handle_user_registration` to loop endlessly. The `timeout` should make
     // sure that we fail properly and with an understandable error message.
-    //
-    // This will presumably disappear if the `synapse_is_responsive` manipulation above works.
-    match tokio::time::timeout(std::time::Duration::new(120, 0), async {
+    let registration = async {
         handle_user_registration(config)
             .await
             .context("Failed to setup users")
-    })
-    .await
-    {
-        Err(_) => {
-            // Timeout.
-            panic!(
-                "User registration is taking too long. {}",
-                if docker.is_container_running(&run_container_name).await? {
-                    "Container is running."
-                } else {
-                    "For some reason, Synapse has stopped. Please check the Synapse logs and/or rerun `mx-tester up`."
-                }
-            );
-        }
-        Ok(result) => result,
-    }?;
+    };
+
+    if config.workers.enabled {
+        // With workers, registration is so long that we don't want to timeou.
+        registration.await?;
+    } else {
+        match tokio::time::timeout(TIMEOUT_USER_REGISTRATION_SIMPLE, registration).await {
+            Err(_) => {
+                // Timeout.
+                panic!(
+                    "User registration is taking too long. {is_running}",
+                    is_running = if docker.is_container_running(&run_container_name).await? {
+                        "Container is running, so this is usually an error in Synapse or modules."
+                    } else {
+                        "For some reason, the Docker image has stopped."
+                    },
+                );
+            }
+            Ok(result) => result,
+        }?
+    };
     if let Some(UpScript::FullUpScript(FullUpScript {
         after: Some(ref script),
         ..
@@ -1056,9 +1494,14 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     {
         let env = config.shared_env_variables()?;
         script
-            .run(&env)
+            .run("up", &script_log_dir, &env)
+            .await
             .context("Error running `up` script (after)")?;
     }
+
+    cleanup.disarm();
+
+    println!("* up step: success");
     Ok(())
 }
 
@@ -1068,8 +1511,11 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
     let SynapseVersion::Docker { .. } = config.synapse;
     let run_container_name = config.run_container_name();
 
+    println!("\n* down step: starting");
+
     // Store results, we'll report them after we've brought down everything
     // that we can bring down.
+    let script_log_dir = config.scripts_logs_dir();
     let script_result = if let Some(ref down_script) = config.down {
         let env = config.shared_env_variables()?;
         // First run on_failure/on_success.
@@ -1082,7 +1528,8 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
                     ..
                 },
             ) => on_failure
-                .run(&env)
+                .run("on_failure", &script_log_dir, &env)
+                .await
                 .context("Error while running script `down/failure`"),
             (
                 Status::Success,
@@ -1091,7 +1538,8 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
                     ..
                 },
             ) => on_success
-                .run(&env)
+                .run("on_success", &script_log_dir, &env)
+                .await
                 .context("Error while running script `down/success`"),
             _ => Ok(()),
         };
@@ -1099,7 +1547,8 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
         if let Some(ref on_always) = down_script.finally {
             result.and(
                 on_always
-                    .run(&env)
+                    .run("on_always", &script_log_dir, &env)
+                    .await
                     .context("Error while running script `down/finally`"),
             )
         } else {
@@ -1111,53 +1560,111 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
 
     debug!(target: "mx-tester-down", "Taking down synapse.");
     let stop_container_result = match docker.stop_container(&run_container_name, None).await {
-        Err(bollard::errors::Error::DockerResponseNotModifiedError { .. }) => {
-            // Synapse is already down.
-            debug!(target: "mx-tester-down", "Synapse was already down");
+        Err(bollard::errors::Error::DockerResponseServerError {
+            message,
+            status_code,
+        }) if status_code >= 200 && status_code < 300 => {
+            debug!(target: "mx-tester-down", "Synapse container stopped: {}", message);
             Ok(())
         }
-        Err(bollard::errors::Error::DockerResponseNotFoundError { .. }) => {
-            // Synapse is already down.
-            debug!(target: "mx-tester-down", "No Synapse container");
+        Err(bollard::errors::Error::DockerResponseServerError {
+            message,
+            status_code,
+        }) if status_code == 304 => {
+            debug!(target: "mx-tester-down", "Synapse container was already down: {}", message);
             Ok(())
         }
-        Ok(_) => {
-            debug!(target: "mx-tester-down", "Synapse taken down");
+        Err(bollard::errors::Error::DockerResponseServerError {
+            message,
+            status_code,
+        }) if status_code == 404 => {
+            debug!(target: "mx-tester-down", "Synapse container not found for stopping: {}", message);
             Ok(())
         }
         Err(err) => Err(err).context("Error stopping container"),
+        Ok(_) => {
+            debug!(target: "mx-tester-down", "Synapse container stopped");
+            Ok(())
+        }
+    };
+
+    let remove_container_result = match docker.remove_container(&run_container_name, None).await {
+        Err(bollard::errors::Error::DockerResponseServerError {
+            message,
+            status_code,
+        }) if status_code >= 200 && status_code < 300 => {
+            debug!(target: "mx-tester-down", "Synapse container removed: {}", message);
+            Ok(())
+        }
+        Err(bollard::errors::Error::DockerResponseServerError {
+            message,
+            status_code,
+        }) if status_code == 304 => {
+            debug!(target: "mx-tester-down", "Synapse container was already removed: {}", message);
+            Ok(())
+        }
+        Err(bollard::errors::Error::DockerResponseServerError {
+            message,
+            status_code,
+        }) if status_code == 404 => {
+            debug!(target: "mx-tester-down", "Synapse container not found for removing: {}", message);
+            Ok(())
+        }
+        Err(err) => Err(err).context("Error removing container"),
+        Ok(_) => {
+            debug!(target: "mx-tester-down", "Synapse container removed");
+            Ok(())
+        }
     };
 
     debug!(target: "mx-tester-down", "Taking down network.");
     let remove_network_result = match docker.remove_network(config.network().as_ref()).await {
-        Err(bollard::errors::Error::DockerResponseNotModifiedError { .. }) => {
-            // Network is already down.
-            debug!(target: "mx-tester-down", "Network was already down");
+        Err(bollard::errors::Error::DockerResponseServerError {
+            message,
+            status_code,
+        }) if status_code >= 200 && status_code < 300 => {
+            debug!(target: "mx-tester-down", "Network removed: {}", message);
             Ok(())
         }
-        Err(bollard::errors::Error::DockerResponseNotFoundError { .. }) => {
-            // Network is already down.
-            debug!(target: "mx-tester-down", "No network");
+        Err(bollard::errors::Error::DockerResponseServerError {
+            message,
+            status_code,
+        }) if status_code == 304 => {
+            debug!(target: "mx-tester-down", "Network was already removed: {}", message);
             Ok(())
         }
+        Err(bollard::errors::Error::DockerResponseServerError {
+            message,
+            status_code,
+        }) if status_code == 404 => {
+            debug!(target: "mx-tester-down", "Network not found for removing: {}", message);
+            Ok(())
+        }
+        Err(err) => Err(err).context("Error removing network"),
         Ok(_) => {
-            debug!(target: "mx-tester-down", "Network taken down");
+            debug!(target: "mx-tester-down", "Network removed");
             Ok(())
         }
-        Err(err) => Err(err).context("Error stopping network"),
     };
+
+    println!("* down step: complete");
     // Finally, report any problem.
     script_result
         .and(stop_container_result)
+        .and(remove_container_result)
         .and(remove_network_result)
 }
 
 /// Run the testing script.
-pub fn run(_docker: &Docker, config: &Config) -> Result<(), Error> {
+pub async fn run(_docker: &Docker, config: &Config) -> Result<(), Error> {
+    println!("\n* run step: starting");
     if let Some(ref code) = config.run {
         let env = config.shared_env_variables()?;
-        code.run(&env).context("Error running `run` script")?;
+        code.run("run", &config.scripts_logs_dir(), &env)
+            .await
+            .context("Error running `run` script")?;
     }
+    println!("* run step: success");
     Ok(())
 }
 
@@ -1172,6 +1679,8 @@ trait DockerExt {
 
     /// Check whether a container has been created (running or otherwise).
     async fn is_container_created(&self, name: &str) -> Result<bool, Error>;
+
+    async fn wait_container_removed(&self, name: &str) -> Result<(), Error>;
 }
 
 #[async_trait::async_trait]
@@ -1183,8 +1692,12 @@ impl DockerExt for Docker {
                 filters: vec![("name", vec![name])].into_iter().collect(),
             }))
             .await?;
+        // `filters` actually filter by substring, so we need to double-check the result.
         debug!("is_network_up {:#?}", networks);
-        Ok(networks.is_empty().not())
+        Ok(networks
+            .into_iter()
+            .filter_map(|network| network.name)
+            .any(|candidate_name| candidate_name.as_str() == name))
     }
 
     /// Check whether a container is currently running.
@@ -1193,13 +1706,18 @@ impl DockerExt for Docker {
             .list_containers(Some(ListContainersOptions {
                 // Check for running containers only
                 all: false,
-                // FIXME: This filter seems to filter by substring. That's... not reliable.
                 filters: vec![("name", vec![name])].into_iter().collect(),
                 ..ListContainersOptions::default()
             }))
             .await?;
+        // `filters` actually filter by substring, so we need to double-check the result.
         debug!("is_container_running {:#?}", containers);
-        Ok(containers.is_empty().not())
+        let found = containers
+            .into_iter()
+            .flat_map(|container| container.names)
+            .flat_map(|names| names.into_iter())
+            .any(|container_name| container_name.as_str() == name);
+        Ok(found)
     }
 
     /// Check whether a container has been created (running or otherwise).
@@ -1213,7 +1731,55 @@ impl DockerExt for Docker {
                 ..ListContainersOptions::default()
             }))
             .await?;
+        // `filters` actually filter by substring, so we need to double-check the result.
         debug!("is_container_created {:#?}", containers);
-        Ok(containers.is_empty().not())
+        let found = containers
+            .into_iter()
+            .flat_map(|container| container.names)
+            .flat_map(|names| names.into_iter())
+            .any(|container_name| container_name.as_str() == name);
+        Ok(found)
+    }
+
+    async fn wait_container_removed(&self, name: &str) -> Result<(), Error> {
+        let mut stream = self.wait_container(
+            &name,
+            Some(WaitContainerOptions {
+                condition: "removed",
+            }),
+        );
+        'waiting: while let Some(result) = stream.next().await {
+            match result {
+                Ok(bollard::models::ContainerWaitResponse {
+                    error: Some(error), ..
+                }) => {
+                    return Err(anyhow!(
+                        "Error while waiting for container {} to be removed: {:?}",
+                        name,
+                        error
+                    ));
+                }
+                Ok(_) => {
+                    // In progress.
+                }
+                Err(bollard::errors::Error::DockerResponseServerError { status_code, .. })
+                    if status_code == 304 =>
+                {
+                    // We started waiting too late, the container is already removed.
+                    break 'waiting;
+                }
+                Err(bollard::errors::Error::DockerResponseServerError { status_code, .. })
+                    if status_code == 404 =>
+                {
+                    // We started waiting too late, the container is already removed.
+                    break 'waiting;
+                }
+                Err(err) => {
+                    return Err(err)
+                        .context(format!("Waiting for container {} to be removed", name));
+                }
+            }
+        }
+        Ok(())
     }
 }
