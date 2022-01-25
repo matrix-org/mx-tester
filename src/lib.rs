@@ -1068,7 +1068,9 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
     let SynapseVersion::Docker { .. } = config.synapse;
     let run_container_name = config.run_container_name();
 
-    if let Some(ref down_script) = config.down {
+    // Store results, we'll report them after we've brought down everything
+    // that we can bring down.
+    let script_result = if let Some(ref down_script) = config.down {
         let env = config.shared_env_variables()?;
         // First run on_failure/on_success.
         // Store errors for later.
@@ -1095,31 +1097,59 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
         };
         // Then run on_always.
         if let Some(ref on_always) = down_script.finally {
-            on_always
-                .run(&env)
-                .context("Error while running script `down/finally`")?;
+            result.and(
+                on_always
+                    .run(&env)
+                    .context("Error while running script `down/finally`"),
+            )
+        } else {
+            result
         }
-        // Report any error from `on_failure` or `on_success`.
-        result?
-    }
+    } else {
+        Ok(())
+    };
+
     debug!(target: "mx-tester-down", "Taking down synapse.");
-    match docker.stop_container(&run_container_name, None).await {
+    let stop_container_result = match docker.stop_container(&run_container_name, None).await {
         Err(bollard::errors::Error::DockerResponseNotModifiedError { .. }) => {
             // Synapse is already down.
             debug!(target: "mx-tester-down", "Synapse was already down");
+            Ok(())
         }
         Err(bollard::errors::Error::DockerResponseNotFoundError { .. }) => {
             // Synapse is already down.
             debug!(target: "mx-tester-down", "No Synapse container");
+            Ok(())
         }
         Ok(_) => {
             debug!(target: "mx-tester-down", "Synapse taken down");
+            Ok(())
         }
-        Err(err) => {
-            return Err(err).context("Error stopping container");
+        Err(err) => Err(err).context("Error stopping container"),
+    };
+
+    debug!(target: "mx-tester-down", "Taking down network.");
+    let remove_network_result = match docker.remove_network(config.network().as_ref()).await {
+        Err(bollard::errors::Error::DockerResponseNotModifiedError { .. }) => {
+            // Network is already down.
+            debug!(target: "mx-tester-down", "Network was already down");
+            Ok(())
         }
-    }
-    Ok(())
+        Err(bollard::errors::Error::DockerResponseNotFoundError { .. }) => {
+            // Network is already down.
+            debug!(target: "mx-tester-down", "No network");
+            Ok(())
+        }
+        Ok(_) => {
+            debug!(target: "mx-tester-down", "Network taken down");
+            Ok(())
+        }
+        Err(err) => Err(err).context("Error stopping network"),
+    };
+    // Finally, report any problem.
+    script_result
+        .and(stop_container_result)
+        .and(remove_network_result)
 }
 
 /// Run the testing script.
