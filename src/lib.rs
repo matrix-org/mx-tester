@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod registration;
+mod workers;
 
 use std::{
     borrow::Cow,
@@ -127,6 +128,14 @@ impl DockerConfig {
             guest: 8008,
         }]
     }
+    pub fn host_port(&self) -> Option<u64> {
+        self.port_mapping.iter().nth(0)
+            .map(|mapping| mapping.host)
+    }
+    pub fn guest_port(&self) -> Option<u64> {
+        self.port_mapping.iter().nth(0)
+            .map(|mapping| mapping.guest)
+    }
 }
 
 /// Configuration for the homeserver.
@@ -232,6 +241,13 @@ pub struct Config {
     ///
     /// May be overridden from the command-line.
     pub directories: Directories,
+
+    #[serde(default)]
+    #[builder(default)]
+    /// Specify whether workers should be used.
+    ///
+    /// May be overridden from the command-line.
+    pub workers: bool,
 }
 
 impl Config {
@@ -274,15 +290,15 @@ impl Config {
             &self.homeserver.registration_shared_secret,
         );
 
-        // HACK: Unless we're already overwriting listeners, patch `listeners`
-        // to make sure it listens on the ports specified in `docker_config`.
-        if self.homeserver.extra_fields.get("listeners").is_none() {
-            if let Some(listeners) = combined_config.get_mut(&YAML::from("listeners")) {
-                let listeners = listeners
-                    .as_sequence_mut()
-                    .ok_or_else(|| anyhow!("`listeners` should be a sequence"))?;
-                debug!("Listeners: {:#?}", listeners);
+        if let Some(listeners) = combined_config.get_mut(&YAML::from("listeners")) {
+            let listeners = listeners
+                .as_sequence_mut()
+                .ok_or_else(|| anyhow!("`listeners` should be a sequence"))?;
+            debug!("Listeners: {:#?}", listeners);
 
+            // HACK: Unless we're already overwriting listeners, patch `listeners`
+            // to make sure it listens on the ports specified in `docker_config`.
+            if self.homeserver.extra_fields.get("listeners").is_none() {
                 // FIXME: For the time being, let's only handle the simplest case.
                 // If we're lucky, we'll be able to find WTH is going on that causes
                 // Synapse to default to 9599 despite the fact that we're specifying 8008
@@ -305,6 +321,10 @@ impl Config {
                         listener["port"] = self.docker.port_mapping[0].guest.into()
                     }
                 }
+            }
+
+            if self.workers {
+                listeners.push(workers::replication_listener());
             }
         }
 
@@ -338,6 +358,10 @@ impl Config {
         Ok(())
     }
 
+    pub fn generate_workers_config(&self) -> Result<(), Error> {
+
+    }
+
     /// The directory in which we're putting all data for this test.
     ///
     /// Cleaned up upon test start.
@@ -354,13 +378,17 @@ impl Config {
 
     /// A tag for the Docker image we're creating/using.
     pub fn tag(&self) -> String {
-        match self.synapse {
-            SynapseVersion::Docker { ref tag } => {
+        match (&self.synapse, self.workers) {
+            (SynapseVersion::Docker { ref tag }, false) => {
                 format!("mx-tester-synapse-{}-{}", tag, self.name)
+            }
+            (SynapseVersion::Docker { ref tag }, true) => {
+                format!("mx-tester-synapse-{}-{}-workers", tag, self.name)
             }
         }
     }
 
+    /// A name for the network we're creating/using.
     pub fn network(&self) -> String {
         self.tag()
     }
@@ -554,7 +582,6 @@ async fn start_synapse_container(
                 .guest
         ),
     ];
-
     if is_container_created {
         debug!("NO need to create container for {}", container_name);
     } else {
@@ -710,7 +737,7 @@ async fn start_synapse_container(
         let mut log_file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(data_dir.join(format!("mx-tester-{}.log", container_name)))
+            .open(data_dir.join(format!("{}.log", container_name)))
             .await?;
         tokio::task::spawn(async move {
             debug!(target: "mx-tester-log", "Starting log watcher");
@@ -830,6 +857,8 @@ FROM {docker_tag}
 # Show the Synapse version, to aid with debugging.
 RUN pip show matrix-synapse
 
+{maybe_setup_workers}
+
 # Copy and install custom modules.
 RUN mkdir /mx-tester
 {setup}
@@ -848,6 +877,26 @@ EXPOSE 8008/tcp 8009/tcp 8448/tcp
         // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
         .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
         .format("\n"),
+    maybe_setup_workers =
+    if config.workers {
+r#"
+# Install postgresql
+RUN apt-get update
+RUN apt-get install -y postgresql
+
+# Configure a user and create a database for Synapse
+RUN pg_ctlcluster 13 main start &&  su postgres -c "echo \
+ \"ALTER USER postgres PASSWORD 'somesecret'; \
+ CREATE DATABASE synapse \
+  ENCODING 'UTF8' \
+  LC_COLLATE='C' \
+  LC_CTYPE='C' \
+  template=template0;\" | psql" && pg_ctlcluster 13 main stop
+
+"#
+    } else {
+        ""
+    }
     );
     debug!("dockerfile {}", dockerfile_content);
 
@@ -1013,7 +1062,21 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         config,
         &synapse_data_directory,
         &run_container_name,
-        vec!["/start.py".to_string()],
+        if config.workers.not() {
+            vec!["/start.py".to_string()]
+        } else {
+            [
+                // Start postgres
+                "pg_ctlcluster 13 main start 2>&1",
+                // Setup postgres - its configuration will be copied to homeserver.yaml.
+                "POSTGRES_PASSWORD=somesecret POSTGRES_USER=postgres POSTGRES_HOST=localhost",
+                // Specify a list of workers. It's ok if they show up more than once.
+                "SYNAPSE_WORKER_TYPES=event_persister, event_persister, background_worker, frontend_proxy, event_creator, user_dir, media_repository, federation_inbound, federation_reader, federation_sender, synchrotron, appservice, pusher",
+                "# Run the Synapse script that writes the necessary config files and starts supervisord, which in turn",
+                "# starts everything else",
+                "/configure_workers_and_start.py"
+            ].iter().map(|s| s.to_string()).collect()
+        },
         true,
     )
     .await

@@ -71,9 +71,17 @@ async fn main() {
         .arg(
             Arg::new("root_dir")
                 .long("root")
+                .value_name("PATH")
                 .takes_value(true)
                 .required(false)
                 .help("Write all files in subdirectories of this directory (default: /tmp)")
+        )
+        .arg(
+            Arg::new("workers")
+                .long("workers")
+                .takes_value(false)
+                .required(false)
+                .help("If specified, use workerized Synapse (default: none)")
         )
         .get_matches();
 
@@ -114,6 +122,8 @@ async fn main() {
     if let Some(root) = matches.value_of("root_dir") {
         config.directories.root = std::path::Path::new(root).to_path_buf()
     }
+    let workers = matches.is_present("workers");
+    config.workers = workers;
 
     // Now run the scripts.
     // We stop immediately if `build` or `up` fails but if `run` fails,

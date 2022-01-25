@@ -82,9 +82,6 @@ async fn test_create_users() {
 
     let config = Config::builder()
         .name("test-create-users".into())
-        .synapse(SynapseVersion::Docker {
-            tag: SYNAPSE_VERSION.into(),
-        })
         .users(vec![
             admin.clone(),
             regular_user.clone(),
@@ -217,4 +214,25 @@ async fn test_repeat() {
             .await
             .expect("Failed in step `down`");
     }
+}
+
+/// Simple test: spawn workers, do nothing else.
+#[tokio::test]
+async fn test_workers_simple() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let docker = DOCKER.clone();
+    let config = Config::builder()
+        .name("test-simple-workers".into())
+        .workers(true)
+        .build()
+        .assign_port();
+    mx_tester::build(&docker, &config)
+        .await
+        .expect("Failed in step `build`");
+    mx_tester::up(&docker, &config)
+        .await
+        .expect("Failed in step `up`");
+    mx_tester::down(&docker, &config, Status::Manual)
+        .await
+        .expect("Failed in step `down`");
 }
