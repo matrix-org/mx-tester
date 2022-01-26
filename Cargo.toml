@@ -18,7 +18,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.8"
 
 # Matrix
-matrix-sdk = { version = "0.4",  features = ["encryption", "sled_cryptostore"] }
+matrix-sdk = { version = "0.4.1",  features = ["encryption", "sled_cryptostore"] }
 
 # HTTP
 reqwest = { version = "0.11.4", features = ["json"] }
@@ -65,7 +65,7 @@ tar = "0.4"
 uuid = { version = "0.8", features = ["v4"] }
 
 # Test APIs
-synapse-admin-api = {version = "0.2", features = ["client"] }
+synapse-admin-api = {git = "https://github.com/ruma/synapse-admin-api", rev = "24de3512f13a4c9ca4c9d42f3b6591876be3d96b", features = ["client"] }
 
 [features]
 # Needed to use macro `ruma_api!`.

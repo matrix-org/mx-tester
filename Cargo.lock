@@ -2579,8 +2579,7 @@ dependencies = [
 [[package]]
 name = "synapse-admin-api"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75f72de244c260c7266a70e836e397a55968859ccd7eded44e5defced6e8324e"
+source = "git+https://github.com/ruma/synapse-admin-api?rev=24de3512f13a4c9ca4c9d42f3b6591876be3d96b#24de3512f13a4c9ca4c9d42f3b6591876be3d96b"
 dependencies = [
  "ruma",
  "serde",
