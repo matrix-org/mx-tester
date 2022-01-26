@@ -1,7 +1,7 @@
 use std::ops::Not;
 
 use lazy_static::lazy_static;
-use log::info;
+use log::{debug, info};
 use mx_tester::{self, registration::User, *};
 
 lazy_static! {
@@ -11,6 +11,31 @@ lazy_static! {
 
 /// The version of Synapse to use for testing.
 const SYNAPSE_VERSION: &str = "matrixdotorg/synapse:latest";
+
+/// Utility trait, designed to simplify assigning a random port for a test.
+trait AssignPort {
+    /// Assign a random port for a test.
+    fn assign_port(self) -> Self;
+}
+
+impl AssignPort for Config {
+    /// Assign a random port for a test.
+    fn assign_port(mut self) -> Self {
+        use rand::Rng;
+        let port = loop {
+            let port = rand::thread_rng().gen_range(1025..10_000);
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                debug!("This test will use port {}", port);
+                break port as u64;
+            }
+            debug!("Port {} already occupied, looking for another", port);
+        };
+        self.docker.port_mapping.get_mut(0).unwrap().host = port;
+        self.homeserver.server_name = format!("localhost:{}", port);
+        self.homeserver.public_baseurl = format!("http://localhost:{}", port);
+        self
+    }
+}
 
 /// Simple test: empty config.
 #[tokio::test]
@@ -22,7 +47,8 @@ async fn test_simple() {
         .synapse(SynapseVersion::Docker {
             tag: SYNAPSE_VERSION.into(),
         })
-        .build();
+        .build()
+        .assign_port();
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
@@ -54,7 +80,6 @@ async fn test_create_users() {
         .password(format!("{}", uuid::Uuid::new_v4()))
         .build();
 
-    // Use port 9998 to avoid colliding with test_simple.
     let config = Config::builder()
         .name("test-create-users".into())
         .synapse(SynapseVersion::Docker {
@@ -65,21 +90,8 @@ async fn test_create_users() {
             regular_user.clone(),
             regular_user_with_custom_password.clone(),
         ])
-        .homeserver(
-            HomeserverConfig::builder()
-                .server_name("localhost:9998".to_string())
-                .public_baseurl("http://localhost:9998".to_string())
-                .build(),
-        )
-        .docker(
-            DockerConfig::builder()
-                .port_mapping(vec![PortMapping {
-                    host: 9998,
-                    guest: 8008,
-                }])
-                .build(),
-        )
-        .build();
+        .build()
+        .assign_port();
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
@@ -191,21 +203,8 @@ async fn test_repeat() {
         .synapse(SynapseVersion::Docker {
             tag: SYNAPSE_VERSION.into(),
         })
-        .homeserver(
-            HomeserverConfig::builder()
-                .server_name("localhost:9997".to_string())
-                .public_baseurl("http://localhost:9997".to_string())
-                .build(),
-        )
-        .docker(
-            DockerConfig::builder()
-                .port_mapping(vec![PortMapping {
-                    host: 9997,
-                    guest: 8008,
-                }])
-                .build(),
-        )
-        .build();
+        .build()
+        .assign_port();
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
