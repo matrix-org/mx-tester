@@ -95,78 +95,185 @@ macro_rules! dict {
         }
     };
 }
+macro_rules! seq {
+    // Empty
+    ( $container: expr, []) => {
+        $container
+    };
+    // Without trailing `,`.
+    ( $container: expr, [ $( $v:expr ),+ ] ) => {
+        seq!($container, [$($v,)* ])
+    };
+    // With trailing `,`.
+    ( $container: expr, [ $( $v:expr ),+, ] ) => {
+        {
+            let mut container = $container;
+            $(
+                container.push($v.into());
+            )*
+            container
+        }
+    };
+}
 
+macro_rules! yaml {
+    // Empty
+    ({}) => {
+        YAML::Mapping(dict!(serde_yaml::Mapping::new(), {}))
+    };
+    // Without trailing `,`.
+    ({ $( $k:expr => $v:expr ),+ } ) => {
+        YAML::Mapping(dict!(serde_yaml::Mapping::new(), { $($k => $v,)* }))
+    };
+    // With trailing `,`.
+    ({ $( $k:expr => $v:expr ),+, } ) => {
+        YAML::Mapping(dict!(serde_yaml::Mapping::new(), { $($k => $v,)* }))
+    };
+    // Empty
+    ( $container: expr, []) => {
+        YAML::Sequence(seq!(serde_yaml::Sequence::new(), []))
+    };
+    // Without trailing `,`.
+    ( $container: expr, [ $( $v:expr ),+ ] ) => {
+        YAML::Sequence(seq!(serde_yaml::Sequence::new(), [$($v,)* ]))
+    };
+    // With trailing `,`.
+    ( $container: expr, [ $( $v:expr ),+, ] ) => {
+        YAML::Sequence(seq!(serde_yaml::Sequence::new(), [$($v,)* ]))
+    };
+}
+
+/*
 macro_rules! dict2 {
-    // tt muncher for objects
-    (@object $factory:expr ; $container:ident ()) => {
-        // Empty dict, nothing to insert.
-        {}
+    //////////////////////////////////////////////////////////////////////////
+    // TT muncher for parsing the inside of an object {...}. Each entry is
+    // inserted into the given map variable.
+    //
+    // Must be invoked as: dict2!(@object $factory; $map () ($($tt)*) ($($tt)*))
+    //
+    // We require two copies of the input tokens so that we can match on one
+    // copy and trigger errors on the other copy.
+    //////////////////////////////////////////////////////////////////////////
+
+    // Done.
+    (@object $factory:expr ; $container:ident () () ()) => {};
+
+    // Insert the current entry followed by trailing comma.
+    (@object $factory:expr ; $container:ident [$($key:tt)+] ($value:expr) , $($rest:tt)*) => {
+        let _ = $container.insert(($($key)+).into(), $value.into());
+        dict2!(@object $factory ; $container () ($($rest)*) ($($rest)*));
     };
-    (@object $factory:expr ; $container:ident $key:expr => $value:expr) => {
-        // Last entry in non-empty dict, no trailing comma.
-        let _ = $container.insert($key.into(), $value.into());
+
+    // Current entry followed by unexpected token.
+    (@object $factory:expr ; $container:ident [$($key:tt)+] ($value:expr) $unexpected:tt $($rest:tt)*) => {
+        dict2_unexpected!($unexpected);
     };
-    (@object $factory:expr ; $container:ident $key:expr => $value:expr,) => {
-        // Last entry in non-empty dict, trailing comma.
-        let _ = $container.insert($key.into(), $value.into());
+
+    // Insert the last entry without trailing comma.
+    (@object $factory:expr ; $container:ident [$($key:tt)+] ($value:expr)) => {
+        let _ = $container.insert(($($key)+).into(), $value.into());
     };
-    (@object $factory:expr ; $container:ident $key:expr => $value:expr, $($rest:tt)+) => {
-        // Non-last entry in non-empty dict.
-        let _ = $container.insert($key.into(), $value.into());
-        dict2!(@object $factory; $container $($rest)+);
+
+    // Next value is a map.
+    (@object $factory:expr ; $container:ident ($($key:tt)+) (=> {$($map:tt)*} $($rest:tt)*) $copy:tt) => {
+        dict2!(@object $factory ; $container [$($key)+] (dict2!(@value $factory; {$($map)*})) $($rest)*);
     };
-    // tt muncher for values
-    (@value $factory:expr; $value:expr) => {
+
+    // Next value is an expression followed by comma.
+    (@object $factory:expr ; $container:ident ($($key:tt)+) (=> $value:expr , $($rest:tt)*) $copy:tt) => {
+        dict2!(@object $factory ; $container [$($key)+] (dict2!(@value $factory; $value)) , $($rest)*);
+    };
+
+    // Last value is an expression with no trailing comma.
+    (@object $factory:expr ; $container:ident ($($key:tt)+) (=> $value:expr) $copy:tt) => {
+        dict2!(@object $factory ; $container [$($key)+] (dict2!(@value $factory; $value)));
+    };
+
+    // Missing value for last entry. Trigger a reasonable error message.
+    (@object $factory:expr ; $container:ident ($($key:tt)+) (=>) $copy:tt) => {
+        // "unexpected end of macro invocation"
+        dict2!();
+    };
+
+    // Missing colon and value for last entry. Trigger a reasonable error
+    // message.
+    (@object $factory:expr ; $container:ident ($($key:tt)+) () $copy:tt) => {
+        // "unexpected end of macro invocation"
+        dict2!();
+    };
+
+    // Misplaced =>. Trigger a reasonable error message.
+    (@object $factory:expr ; $container:ident () (=> $($rest:tt)*) ($colon:tt $($copy:tt)*)) => {
+        // Takes no arguments so "no rules expected the token `=>`".
+        json_unexpected!($colon);
+    };
+
+    // Found a comma inside a key. Trigger a reasonable error message.
+    (@object $factory:expr ; $container:ident ($($key:tt)*) (, $($rest:tt)*) ($comma:tt $($copy:tt)*)) => {
+        // Takes no arguments so "no rules expected the token `,`".
+        json_unexpected!($comma);
+    };
+
+    // Key is fully parenthesized. This avoids clippy double_parens false
+    // positives because the parenthesization may be necessary here.
+    (@object $factory:expr ; $container:ident () (($key:expr) => $($rest:tt)*) $copy:tt) => {
+        dict2!(@object $factory ; $container ($key) (=> $($rest)*) (=> $($rest)*));
+    };
+
+    // Refuse to absorb colon token into key expression.
+    (@object $factory:expr ; $container:ident ($($key:tt)*) (=> $($unexpected:tt)+) $copy:tt) => {
+        json_expect_expr_comma!($($unexpected)+);
+    };
+
+    // Munch a token into the current key.
+    (@object $factory:expr ; $container:ident ($($key:tt)*) ($tt:tt $($rest:tt)*) $copy:tt) => {
+        dict2!(@object $factory ; $container ($($key)* $tt) ($($rest)*) ($($rest)*));
+    };
+
+    // Values.
+    (@value $factory:expr ; $value:expr) => {
         $value.into()
     };
 
-    /*
-    (@object $factory:expr ; $container:ident ($($key:tt)*) ($tt:tt $($rest:tt)*)) => {
-        dict2!(@object $factory; $container ($($key)* $tt) ($($rest)*));
+    (@value $factory:expr ; { $($tt:tt)+ }) => {
+        dict2!($factory, { $($tt:tt)+ })
     };
-    */
 
-    /*
-    (@object $factory:expr ; $container:ident $key:expr => { { $($tt:tt)* } }, $($rest:tt)*) => {
-        // Non-last entry in non-empty dict, followed by comma - special-cased for sub-dictionaries.
+    // public-facing API
+    ( $factory: expr, { }) => {
         {
-            let _ = $container.insert($key.into(), dict2!($factory, { $($tt)* }));
-            dict2!(@object $factory; $($rest)*);
+            $factory
         }
     };
-    (@object $factory:expr; $container:ident ($($key:tt)*) ($tt:tt $($rest:tt)*) ) => {
-        dict2!(@object $factory; $container ($($key)* $tt) ($($rest)*));
-    };
- */
-    // public-facing API
     ( $factory: expr, { $($tt:tt)+ }) => {
         {
             let mut container = $factory;
-            dict2!(@object $factory ; container $($tt)+ );
+            dict2!(@object $factory ; container () $($tt)+ $($tt)+);
             container
         }
-    }
+    };
 }
 
 fn test() {
+    let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { });
     let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => 5u32 });
     let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => 5u32, });
     let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => 5u32, "bar" => 6u32});
     let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => 5u32, "bar" => 6u32,});
     let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => { "bar" => 5 }, });
 }
-
+*/
 pub fn replication_listener() -> YAML {
-    dict!(serde_yaml::Mapping::new(), {
+    yaml!({
         "port" => 9093,
         "bind_address" => "127.0.0.1",
         "type" => "http",
-        "resources" => vec![
-            dict!(serde_yaml::Mapping::new(), {
-                "names" => vec!["replication"]
-            }
-        )]
-    }).into()
+        "resources" => yaml!([
+            yaml!({
+                "names" => yaml!["replication"]
+            })
+        ])
+    })
 }
 
 #[derive(Default, Serialize)]
