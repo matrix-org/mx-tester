@@ -110,32 +110,50 @@ macro_rules! dict2 {
         // Last entry in non-empty dict, trailing comma.
         let _ = $container.insert($key.into(), $value.into());
     };
+    (@object $factory:expr ; $container:ident $key:expr => $value:expr, $($rest:tt)+) => {
+        // Non-last entry in non-empty dict.
+        let _ = $container.insert($key.into(), $value.into());
+        dict2!(@object $factory; $container $($rest)+);
+    };
+    // tt muncher for values
+    (@value $factory:expr; $value:expr) => {
+        $value.into()
+    };
 
-    (@object $factory:expr ; $container:ident $key:expr => { { $($tt:tt)* } }, $($rest:tt)+) => {
+    /*
+    (@object $factory:expr ; $container:ident ($($key:tt)*) ($tt:tt $($rest:tt)*)) => {
+        dict2!(@object $factory; $container ($($key)* $tt) ($($rest)*));
+    };
+    */
+
+    /*
+    (@object $factory:expr ; $container:ident $key:expr => { { $($tt:tt)* } }, $($rest:tt)*) => {
         // Non-last entry in non-empty dict, followed by comma - special-cased for sub-dictionaries.
         {
             let _ = $container.insert($key.into(), dict2!($factory, { $($tt)* }));
             dict2!(@object $factory; $($rest)*);
         }
     };
-    (@object $factory:expr ; $container:ident $key:expr => $value:expr, $($rest:tt)+) => {
-        // Non-last entry in non-empty dict.
-        let _ = $container.insert($key.into(), $value.into());
-        dict2!(@object $factory; $($rest)*);
+    (@object $factory:expr; $container:ident ($($key:tt)*) ($tt:tt $($rest:tt)*) ) => {
+        dict2!(@object $factory; $container ($($key)* $tt) ($($rest)*));
     };
+ */
     // public-facing API
     ( $factory: expr, { $($tt:tt)+ }) => {
         {
             let mut container = $factory;
-            dict2!(@object $factory ; container $($tt)* );
+            dict2!(@object $factory ; container $($tt)+ );
             container
         }
     }
 }
 
 fn test() {
-    let _ = dict2!(std::collections::HashMap::<String, ()>::new(), { "foo" => {}, });
-    let _ = dict2!(std::collections::HashMap::<String, ()>::new(), { "foo" => { "bar" => 5 }, });
+    let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => 5u32 });
+    let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => 5u32, });
+    let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => 5u32, "bar" => 6u32});
+    let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => 5u32, "bar" => 6u32,});
+    let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => { "bar" => 5 }, });
 }
 
 pub fn replication_listener() -> YAML {
