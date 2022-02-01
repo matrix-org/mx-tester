@@ -1,0 +1,10 @@
+--- old.supervisor.service	2022-01-31 10:09:22.109347133 +0100
++++ new.supervisor.service	2022-01-31 10:09:47.237398559 +0100
+@@ -10,6 +10,7 @@
+ KillMode=process
+ Restart=on-failure
+ RestartSec=50s
++RuntimeDirectoryMode=777
+ 
+ [Install]
+ WantedBy=multi-user.target

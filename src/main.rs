@@ -83,6 +83,14 @@ async fn main() {
                 .required(false)
                 .help("If specified, use workerized Synapse (default: none)")
         )
+        .arg(
+            Arg::new("synapse-tag")
+                .long("synapse-tag")
+                .value_name("TAG")
+                .takes_value(true)
+                .required(false)
+                .help("If specified, use the Docker image published with TAG (default: use mx-tester.yml or tag `latest`)")
+        )
         .get_matches();
 
     let config_path = matches
@@ -124,6 +132,11 @@ async fn main() {
     }
     let workers = matches.is_present("workers");
     config.workers = workers;
+    if let Some(synapse_tag) = matches.value_of("synapse-tag") {
+        config.synapse = SynapseVersion::Docker {
+            tag: format!("matrixdotorg/synapse:{}", synapse_tag)
+        };
+    }
 
     // Now run the scripts.
     // We stop immediately if `build` or `up` fails but if `run` fails,

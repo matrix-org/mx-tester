@@ -175,3 +175,22 @@ macro_rules! yaml {
         serde_yaml::Value::from($v)
     }
 }
+
+/// Utility extensions to manipulate yaml.
+pub trait YamlExt {
+    /// Convert a yaml subtree into a sequence.
+    ///
+    /// This works only if the yaml subtree is either null or already a sequence.
+    fn to_seq_mut(&mut self) -> Option<&mut serde_yaml::Sequence>;
+}
+impl YamlExt for serde_yaml::Value {
+    /// Convert a yaml subtree into a sequence.
+    ///
+    /// This works only if the yaml subtree is either null or already a sequence.
+    fn to_seq_mut(&mut self) -> Option<&mut serde_yaml::Sequence> {
+        if self.is_null() {
+            *self = yaml!([]);
+        }
+        self.as_sequence_mut()
+    }
+}

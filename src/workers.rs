@@ -117,152 +117,32 @@ macro_rules! seq {
 }
 
 macro_rules! yaml {
-    // Empty
+    // Map: empty
     ({}) => {
         YAML::Mapping(dict!(serde_yaml::Mapping::new(), {}))
     };
-    // Without trailing `,`.
+    // Map: without trailing `,`.
     ({ $( $k:expr => $v:expr ),+ } ) => {
         YAML::Mapping(dict!(serde_yaml::Mapping::new(), { $($k => $v,)* }))
     };
-    // With trailing `,`.
+    // Map: with trailing `,`.
     ({ $( $k:expr => $v:expr ),+, } ) => {
         YAML::Mapping(dict!(serde_yaml::Mapping::new(), { $($k => $v,)* }))
     };
-    // Empty
-    ( $container: expr, []) => {
+    // Sequence: empty
+    ([]) => {
         YAML::Sequence(seq!(serde_yaml::Sequence::new(), []))
     };
-    // Without trailing `,`.
-    ( $container: expr, [ $( $v:expr ),+ ] ) => {
+    // Sequence: without trailing `,`.
+    ( [ $( $v:expr ),+ ] ) => {
         YAML::Sequence(seq!(serde_yaml::Sequence::new(), [$($v,)* ]))
     };
-    // With trailing `,`.
-    ( $container: expr, [ $( $v:expr ),+, ] ) => {
+    // Sequence: with trailing `,`.
+    ( [ $( $v:expr ),+, ] ) => {
         YAML::Sequence(seq!(serde_yaml::Sequence::new(), [$($v,)* ]))
     };
 }
 
-/*
-macro_rules! dict2 {
-    //////////////////////////////////////////////////////////////////////////
-    // TT muncher for parsing the inside of an object {...}. Each entry is
-    // inserted into the given map variable.
-    //
-    // Must be invoked as: dict2!(@object $factory; $map () ($($tt)*) ($($tt)*))
-    //
-    // We require two copies of the input tokens so that we can match on one
-    // copy and trigger errors on the other copy.
-    //////////////////////////////////////////////////////////////////////////
-
-    // Done.
-    (@object $factory:expr ; $container:ident () () ()) => {};
-
-    // Insert the current entry followed by trailing comma.
-    (@object $factory:expr ; $container:ident [$($key:tt)+] ($value:expr) , $($rest:tt)*) => {
-        let _ = $container.insert(($($key)+).into(), $value.into());
-        dict2!(@object $factory ; $container () ($($rest)*) ($($rest)*));
-    };
-
-    // Current entry followed by unexpected token.
-    (@object $factory:expr ; $container:ident [$($key:tt)+] ($value:expr) $unexpected:tt $($rest:tt)*) => {
-        dict2_unexpected!($unexpected);
-    };
-
-    // Insert the last entry without trailing comma.
-    (@object $factory:expr ; $container:ident [$($key:tt)+] ($value:expr)) => {
-        let _ = $container.insert(($($key)+).into(), $value.into());
-    };
-
-    // Next value is a map.
-    (@object $factory:expr ; $container:ident ($($key:tt)+) (=> {$($map:tt)*} $($rest:tt)*) $copy:tt) => {
-        dict2!(@object $factory ; $container [$($key)+] (dict2!(@value $factory; {$($map)*})) $($rest)*);
-    };
-
-    // Next value is an expression followed by comma.
-    (@object $factory:expr ; $container:ident ($($key:tt)+) (=> $value:expr , $($rest:tt)*) $copy:tt) => {
-        dict2!(@object $factory ; $container [$($key)+] (dict2!(@value $factory; $value)) , $($rest)*);
-    };
-
-    // Last value is an expression with no trailing comma.
-    (@object $factory:expr ; $container:ident ($($key:tt)+) (=> $value:expr) $copy:tt) => {
-        dict2!(@object $factory ; $container [$($key)+] (dict2!(@value $factory; $value)));
-    };
-
-    // Missing value for last entry. Trigger a reasonable error message.
-    (@object $factory:expr ; $container:ident ($($key:tt)+) (=>) $copy:tt) => {
-        // "unexpected end of macro invocation"
-        dict2!();
-    };
-
-    // Missing colon and value for last entry. Trigger a reasonable error
-    // message.
-    (@object $factory:expr ; $container:ident ($($key:tt)+) () $copy:tt) => {
-        // "unexpected end of macro invocation"
-        dict2!();
-    };
-
-    // Misplaced =>. Trigger a reasonable error message.
-    (@object $factory:expr ; $container:ident () (=> $($rest:tt)*) ($colon:tt $($copy:tt)*)) => {
-        // Takes no arguments so "no rules expected the token `=>`".
-        json_unexpected!($colon);
-    };
-
-    // Found a comma inside a key. Trigger a reasonable error message.
-    (@object $factory:expr ; $container:ident ($($key:tt)*) (, $($rest:tt)*) ($comma:tt $($copy:tt)*)) => {
-        // Takes no arguments so "no rules expected the token `,`".
-        json_unexpected!($comma);
-    };
-
-    // Key is fully parenthesized. This avoids clippy double_parens false
-    // positives because the parenthesization may be necessary here.
-    (@object $factory:expr ; $container:ident () (($key:expr) => $($rest:tt)*) $copy:tt) => {
-        dict2!(@object $factory ; $container ($key) (=> $($rest)*) (=> $($rest)*));
-    };
-
-    // Refuse to absorb colon token into key expression.
-    (@object $factory:expr ; $container:ident ($($key:tt)*) (=> $($unexpected:tt)+) $copy:tt) => {
-        json_expect_expr_comma!($($unexpected)+);
-    };
-
-    // Munch a token into the current key.
-    (@object $factory:expr ; $container:ident ($($key:tt)*) ($tt:tt $($rest:tt)*) $copy:tt) => {
-        dict2!(@object $factory ; $container ($($key)* $tt) ($($rest)*) ($($rest)*));
-    };
-
-    // Values.
-    (@value $factory:expr ; $value:expr) => {
-        $value.into()
-    };
-
-    (@value $factory:expr ; { $($tt:tt)+ }) => {
-        dict2!($factory, { $($tt:tt)+ })
-    };
-
-    // public-facing API
-    ( $factory: expr, { }) => {
-        {
-            $factory
-        }
-    };
-    ( $factory: expr, { $($tt:tt)+ }) => {
-        {
-            let mut container = $factory;
-            dict2!(@object $factory ; container () $($tt)+ $($tt)+);
-            container
-        }
-    };
-}
-
-fn test() {
-    let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { });
-    let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => 5u32 });
-    let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => 5u32, });
-    let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => 5u32, "bar" => 6u32});
-    let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => 5u32, "bar" => 6u32,});
-    let _ = dict2!(std::collections::HashMap::<String, u32>::new(), { "foo" => { "bar" => 5 }, });
-}
-*/
 pub fn replication_listener() -> YAML {
     yaml!({
         "port" => 9093,
@@ -270,7 +150,7 @@ pub fn replication_listener() -> YAML {
         "type" => "http",
         "resources" => yaml!([
             yaml!({
-                "names" => yaml!["replication"]
+                "names" => yaml!(["replication"])
             })
         ])
     })
@@ -282,7 +162,7 @@ struct WorkerData {
     listener_resources: Vec<Cow<'static, str>>,
     endpoint_patterns:  Vec<Cow<'static, str>>,
     shared_extra_conf: YAML,
-    worker_extra_conf: Cow<'static, str>,
+    worker_extra_conf: YAML,
 }
 
 // Adapted from Synapse's `configure_workers_and_start.py`.
@@ -291,7 +171,7 @@ fn worker_config(worker: WorkerKind, config: &crate::Config) -> Result<WorkerDat
     let config = match worker {
         Pusher => WorkerData {
             app: "synapse.app.pusher".into(),
-            shared_extra_conf: dict!(serde_yaml::Mapping::new(), {"start_pushers" => false}).into(),
+            shared_extra_conf: yaml!({"start_pushers" => false}).into(),
             ..WorkerData::default()
         },
         UserDir => WorkerData {
@@ -300,7 +180,7 @@ fn worker_config(worker: WorkerKind, config: &crate::Config) -> Result<WorkerDat
             endpoint_patterns: vec![
                 "^/_matrix/client/(api/v1|r0|v3|unstable)/user_directory/search$".into()
             ],
-            shared_extra_conf: dict!(serde_yaml::Mapping::new(), {"update_user_directory" => false}).into(),
+            shared_extra_conf: yaml!({"update_user_directory" => false}).into(),
             ..WorkerData::default()
         },
         MediaRepository => WorkerData {
@@ -314,17 +194,17 @@ fn worker_config(worker: WorkerKind, config: &crate::Config) -> Result<WorkerDat
                 "^/_synapse/admin/v1/media/.*$".into(),
                 "^/_synapse/admin/v1/quarantine_media/.*$".into(),
             ],
-            shared_extra_conf: dict!(serde_yaml::Mapping::new(), {"enable_media_repo" => false}).into(),
+            shared_extra_conf: yaml!({"enable_media_repo" => false}).into(),
             worker_extra_conf: "enable_media_repo: true".into(),
         },
         AppService => WorkerData {
             app: "synapse.app.appservice".into(),
-            shared_extra_conf: dict!(serde_yaml::Mapping::new(), {"notify_appservices" => false}).into(),
+            shared_extra_conf: yaml!({"notify_appservices" => false}).into(),
             ..WorkerData::default()
         },
         FederationSender => WorkerData {
             app: "synapse.app.federation_sender".into(),
-            shared_extra_conf: dict!(serde_yaml::Mapping::new(), {"send_federation" => false}).into(),
+            shared_extra_conf: yaml!({"send_federation" => false}).into(),
             ..WorkerData::default()
         },
         FederationReader => WorkerData {
@@ -378,7 +258,7 @@ fn worker_config(worker: WorkerKind, config: &crate::Config) -> Result<WorkerDat
             app: "synapse.app.generic_worker".into(),
             // This worker cannot be sharded. Therefore there should only ever be one background
             // worker, and it should be named background_worker1
-            shared_extra_conf: dict!(serde_yaml::Mapping::new(), {"run_background_tasks_on" => "background_worker1"}).into(),
+            shared_extra_conf: yaml!({"run_background_tasks_on" => "background_worker1"}).into(),
             ..WorkerData::default()
         },
         EventCreator => WorkerData {
@@ -427,133 +307,94 @@ fn generate_workers_config(config: &Config, workers: &[WorkerKind]) -> Result<()
             name = kind.as_str(),
             counter = counter);
 
-        let log_file_path = workers_path.join(name).as_path().with_extension("log.config")
+        let log_config_file_path = workers_path.join(name).as_path().with_extension("log.config")
             .as_os_str()
             .to_str()
-            .context("File path cannot be converted to Unicode")?;
+            .context("Log file path cannot be converted to Unicode")?;
 
         // Generate and write config for this worker.
         let config = worker_config(*kind, config)?;
         let config_file_path = workers_path.join(name).as_path().with_extension(name);
-/*
-        let config_yaml = dict!(serde_yaml::Mapping::new(), {
+        let config_yaml = yaml!({
             "worker_app" => config.app,
             "worker_name" => name,
+            // The replication listener on the main synapse process.
             "worker_replication_host" => "127.0.0.1",
             "worker_replication_http_port" => 9093,
-            "worker_listeners" => dict!(serde_yaml::Mapping::new(), {vec![
-
-            ]
+            "worker_listeners" => yaml!({
+                "type" => "http",
+                "port" => worker_port,
+                "resources" => yaml!([
+                    yaml!({
+                        "names" => config.listener_resources.iter().map(|s| s.to_string()).collect_vec()
+                    })
+                ])
+            }),
+            "worker_log_config" => log_config_file_path
         });
-*/
-        let config_content = format!("
-# This is a configuration template for a single worker instance, and is
-# used by Dockerfile-workers.
-# Values will be change depending on whichever workers are selected when
-# running that image.
-
-worker_app: \"{app}\"
-worker_name: \"{name}\"
-
-# The replication listener on the main synapse process.
-worker_replication_host: 127.0.0.1
-worker_replication_http_port: 9093
-
-worker_listeners:
-  - type: http
-    port: {port}
-{maybe_listener_resources}
-
-worker_log_config: {worker_log_config_filepath}
-
-{worker_extra_conf}
-",
-        app = config.app,
-        name = name,
-        port = worker_port,
-        worker_log_config_filepath = log_file_path,
-        worker_extra_conf = config.worker_extra_conf,
-        maybe_listener_resources = if config.listener_resources.is_empty() {
-            Cow::from("")
-        } else {
-            Cow::from(format!(
-"   resources:
-        - names:
-{}
-",
-                config.listener_resources.iter().map(|res| format!(
-"            - {}
-",
-                    res
-                )).format("")
-))
-        });
-        std::fs::write(config_file_path, config_content)
+        serde_yaml::to_writer(std::fs::File::create(config_file_path)?, &config_yaml)
             .context("Could not write worker configuration")?;
 
-        let log_config_content = format!("
-version: 1
+        let log_config_yaml = yaml!({
+            "version" => 1,
 
-formatters:
-    precise:
-        format: '%(asctime)s - worker:{worker_name} - %(name)s - %(lineno)d - %(levelname)s - %(request)s - %(message)s'
+            "formatters" => yaml!({
+                "precise" => yaml!({
+                    "format" => format!("%(asctime)s - worker:{worker_name} - %(name)s - %(lineno)d - %(levelname)s - %(request)s - %(message)s",
+                        worker_name = name)
+                })
+            }),
+            "handlers" => yaml!({
+                "file" => yaml!({
+                    "class" => "logging.handlers.TimedRotatingFileHandler",
+                    "formatter" => "precise",
+                    "filename" => log_config_file_path,
+                    "when" => "midnight",
+                    "backupCount" => 6,  // Does not include the current log file.
+                    "encoding" => "utf8"
+                }),
+                // Default to buffering writes to log file for efficiency.
+                // WARNING/ERROR logs will still be flushed immediately, but there will be a
+                // delay (of up to `period` seconds, or until the buffer is full with
+                // `capacity` messages) before INFO/DEBUG logs get written.
+                "target" => "file",
 
-handlers:
-    file:
-        class: logging.handlers.TimedRotatingFileHandler
-        formatter: precise
-        filename: {log_file_path}
-        when: \"midnight\"
-        backupCount: 6  # Does not include the current log file.
-        encoding: utf8
+                // The capacity is the maximum number of log lines that are buffered
+                // before being written to disk. Increasing this will lead to better
+                // performance, at the expensive of it taking longer for log lines to
+                // be written to disk.
+                // This parameter is required.
+                "capacity" =>  10,
 
-    # Default to buffering writes to log file for efficiency.
-    # WARNING/ERROR logs will still be flushed immediately, but there will be a
-    # delay (of up to `period` seconds, or until the buffer is full with
-    # `capacity` messages) before INFO/DEBUG logs get written.
-    buffer:
-        class: synapse.logging.handlers.PeriodicallyFlushingMemoryHandler
-        target: file
+                // Logs with a level at or above the flush level will cause the buffer to
+                // be flushed immediately.
+                // Default value =>  40 (ERROR)
+                // Other values =>  50 (CRITICAL), 30 (WARNING), 20 (INFO), 10 (DEBUG)
+                "flushLevel" =>  30,  // Flush immediately for WARNING logs and higher
 
-        # The capacity is the maximum number of log lines that are buffered
-        # before being written to disk. Increasing this will lead to better
-        # performance, at the expensive of it taking longer for log lines to
-        # be written to disk.
-        # This parameter is required.
-        capacity: 10
+                // The period of time, in seconds, between forced flushes.
+                // Messages will not be delayed for longer than this time.
+                // Default value =>  5 seconds
+                "period" =>  5,
+                "console" => yaml!({
+                    "class" =>  "logging.StreamHandler",
+                    "formatter" =>  "precise"
+                })
+            }),
 
-        # Logs with a level at or above the flush level will cause the buffer to
-        # be flushed immediately.
-        # Default value: 40 (ERROR)
-        # Other values: 50 (CRITICAL), 30 (WARNING), 20 (INFO), 10 (DEBUG)
-        flushLevel: 30  # Flush immediately for WARNING logs and higher
+            "loggers" => yaml!({
+                "synapse.storage.SQL" => yaml!({
+                    "level" =>  "INFO"
+                })
+            }),
 
-        # The period of time, in seconds, between forced flushes.
-        # Messages will not be delayed for longer than this time.
-        # Default value: 5 seconds
-        period: 5
-
-    console:
-        class: logging.StreamHandler
-        formatter: precise
-
-loggers:
-    synapse.storage.SQL:
-        # beware: increasing this to DEBUG will make synapse log sensitive
-        # information such as access tokens.
-        level: INFO
-
-root:
-    level: {log_level}
-
-    handlers: [console, buffer]
-
-disable_existing_loggers: false        
-",
-        worker_name = name,
-        log_file_path = log_file_path,
-        log_level = "INFO");
-        std::fs::write(log_file_path, log_config_content)
+            "root" => yaml!({
+                "level" => "INFO",
+                "handlers" => "[console, buffer]"
+            }),
+            "disable_existing_loggers" =>  false
+        });
+        serde_yaml::to_writer(std::fs::File::create(log_config_file_path)?, &log_config_yaml)
             .context("Could not write worker logging configuration")?;
     }
 
