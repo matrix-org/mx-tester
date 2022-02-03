@@ -542,7 +542,9 @@ def start_supervisord():
         "mkdir -p /var/lib/redis",
         "chmod ugo+rwx /var/lib/redis",
 
-        # Give nginx access to its files and directories.
+        # Remove Give nginx access to its files and directories,
+        # remove its default sites.
+        "rm /etc/nginx/sites-enabled/default",
         "mkdir -p /var/lib/nginx",
         "mkdir -p /var/log/nginx",
         "chmod ugo+rwx /var/lib/nginx",
@@ -557,6 +559,10 @@ def start_supervisord():
 
         # FIXME: What uses this?
         "chmod ugo+rw /var/log/journal",
+
+        # Setup and launch postgres
+        "pg_ctlcluster 13 main start",
+        "sudo -u postgres psql -f /conf/postgres.sql"
     ]:
         os.popen("sudo -S %s"%(command), 'w').write('password')
     subprocess.run(["/usr/bin/supervisord", "--user=mx-tester", "--nodaemon"],

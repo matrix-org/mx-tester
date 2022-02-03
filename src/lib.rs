@@ -319,7 +319,8 @@ impl Config {
         // For some reason, `start.py generate` tends to put port 4153 instead of 8008.
         let listeners = combined_config.entry(LISTENERS.into())
             .or_insert_with(|| yaml!([]));
-        *listeners = yaml!([yaml!({
+        *listeners = yaml!([
+            yaml!({
                 "port" => if self.workers { HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT } else { HARDCODED_GUEST_PORT },
                 "tls" => false,
                 "type" => "http",
@@ -347,16 +348,33 @@ impl Config {
         }
 
         if self.workers {
-            // If we have workers, we need to deactivate a few features in the main process
-            // and let a worker take over it.
             for (key, value) in std::array::IntoIter::new([
+                // No worker support without redis.
+                ("redis", yaml!({
+                    "enabled" => true,
+                })),
+                // No worker support without postgresql
+                ("database", yaml!({
+                    "name" => "psycopg2",
+                    "txn_limit" => 10_000,
+                    "args" => yaml!({
+                        "user" => "synapse",
+                        "password" => "password",
+                        "host" => "localhost",
+                        "port" => 5432,
+                        "cp_min" => 5,
+                        "cp_max" => 10
+                    })
+                })),
+                // Deactivate a few features in the main process
+                // and let a worker take over them.
                 ("notify_appservices", yaml!(false)),
                 ("send_federation", yaml!(false)),
                 ("update_user_directory", yaml!(false)),
                 ("start_pushers", yaml!(false)),
                 ("url_preview_enabled", yaml!(false)),
                 ("url_preview_ip_range_blacklist", yaml!([
-                    "255.255.255.255/32"
+                    "255.255.255.255/32",
                 ])),
                 // Also, let's get rid of that warning, it pollutes logs.
                 ("suppress_key_server_warning", yaml!(true)),
@@ -381,12 +399,25 @@ impl Config {
                 modules_root.push(module.config.clone());
             }
 
-            // Workers don't support url_preview_enabled out of the box.
             for (key, value) in std::array::IntoIter::new([
+                // Disable url_preview_enabled.
                 ("url_preview_enabled", yaml!(false)),
                 ("url_preview_ip_range_blacklist", yaml!([
                     "255.255.255.255/32"
                 ])),
+                // No worker without postgres.
+                ("database", yaml!({
+                    "name" => "psycopg2",
+                    "txn_limit" => 10_000,
+                    "args" => yaml!({
+                        "user" => "synapse",
+                        "password" => "password",
+                        "host" => "localhost",
+                        "port" => 5432,
+                        "cp_min" => 5,
+                        "cp_max" => 10
+                    })
+                })),                
             ]) {
                 config.insert(yaml!(key), value);
             }
@@ -952,7 +983,10 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
             (conf_dir.join("supervisord.conf.j2"), include_str!("../res/workers/supervisord.conf.j2")),
             (conf_dir.join("nginx.conf.j2"), include_str!("../res/workers/nginx.conf.j2")),
             (conf_dir.join("log.config"), include_str!("../res/workers/log.config")),
+            // workers_start.py is adapted from Synapse's git repo.
             (synapse_root.join("workers_start.py"), include_str!("../res/workers/workers_start.py")),
+            // ...
+            (conf_dir.join("postgres.sql"), include_str!("../res/workers/postgres.sql")),
         ];
         for (path, content) in &data {
             std::fs::write(&path, content)
@@ -969,7 +1003,9 @@ FROM {docker_tag}
 VOLUME [\"/data\", \"/conf/workers\", \"/etc/nginx/conf.d\", \"/etc/supervisor/conf.d\"]
 
 # We're not running as root, to avoid messing up with the host
-# filesystem, so we need a proper user.
+# filesystem, so we need a proper user. We give it the current
+# use's uid to make sure that files written by this Docker image
+# can be read and removed by the host's user.
 RUN useradd mx-tester --uid {uid} --groups sudo
 
 # Add a password, to be able to run sudo. We'll use it to
@@ -1011,26 +1047,10 @@ EXPOSE {synapse_http_port}/tcp 8009/tcp 8448/tcp
 "
 # Install dependencies
 RUN apt-get update
-RUN apt-get install -y postgresql supervisor redis nginx sudo
+RUN apt-get install -y postgresql postgresql-client-13 supervisor redis nginx sudo
 
-# Configure a user and create a database for Synapse
-RUN pg_ctlcluster 13 main start &&  su postgres -c \"echo \
- \\\"ALTER USER postgres PASSWORD 'somesecret'; \
- CREATE DATABASE synapse \
-  ENCODING 'UTF8' \
-  LC_COLLATE='C' \
-  LC_CTYPE='C' \
-  template=template0;\\\" | psql\" && pg_ctlcluster 13 main stop
-
-# Reset nginx configuration
-RUN rm /etc/nginx/sites-enabled/default
-# Expose nginx listener port
-EXPOSE 8080/tcp
-RUN mkdir -p -v /etc/nginx/conf.d/
-
-
-RUN mkdir -p -v /conf/workers
 # For workers, we're not using start.py but workers_start.py
+# (which does call start.py, but that's a long story).
 COPY workers_start.py /workers_start.py
 COPY conf/* /conf/
 
@@ -1038,23 +1058,6 @@ COPY conf/* /conf/
 # let's make sure that it *can* run, write to /etc/nginx & co.
 RUN chmod ugo+rx /workers_start.py
 RUN chown mx-tester /workers_start.py
-RUN chmod ugo+rw /conf /conf/workers
-RUN chmod ugo+rw /etc/nginx/conf.d
-RUN mkdir -p /var/log/nginx && chmod ugo+rw /var/log/nginx
-
-# Keep supervisor happy
-RUN mkdir -p -v /etc/supervisor/conf.d/foobar
-RUN mkdir -p /var/log/journal
-RUN mkdir -p /var/run
-RUN chmod ugo+rw /etc/supervisor/conf.d
-RUN chmod ugo+rw /var/log/supervisor
-RUN chmod ugo+rw /var/log/journal
-RUN chmod ugo+rw /var/run
-
-# Supervisor expects to be run as root but we're not root,
-# because *that* would mess with the host's file system
-# RUN apt-get install -y systemctl
-# RUN patch /etc/systemd/system/multi-user.target.wants/supervisord.service /conf/supervisor.service.patch
 "
     } else {
         ""
