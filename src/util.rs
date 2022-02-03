@@ -181,7 +181,7 @@ pub trait YamlExt {
     /// Convert a yaml subtree into a sequence.
     ///
     /// This works only if the yaml subtree is either null or already a sequence.
-    fn to_seq_mut(&mut self) -> Option<&mut serde_yaml::Sequence>;
+    fn to_seq_mut(&mut self) -> Option<&mut serde_yaml::Sequence>;    
 }
 impl YamlExt for serde_yaml::Value {
     /// Convert a yaml subtree into a sequence.
@@ -193,4 +193,9 @@ impl YamlExt for serde_yaml::Value {
         }
         self.as_sequence_mut()
     }
+}
+
+/// Utility function: return `true`.
+pub fn true_()-> bool {
+    true
 }

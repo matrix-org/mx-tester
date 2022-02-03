@@ -91,6 +91,12 @@ async fn main() {
                 .required(false)
                 .help("If specified, use the Docker image published with TAG (default: use mx-tester.yml or tag `latest`)")
         )
+        .arg(
+            Arg::new("no-autoclean-on-error")
+                .long("no-autoclean-on-error")
+                .takes_value(false)
+                .help("If specified, do NOT clean up containers in case of error")
+        )
         .get_matches();
 
     let config_path = matches

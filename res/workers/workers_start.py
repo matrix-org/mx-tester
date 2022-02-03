@@ -27,7 +27,9 @@
 # continue to work if so.
 
 import getpass
+import grp
 import os
+import pwd 
 import subprocess
 import sys
 
@@ -531,9 +533,40 @@ def start_supervisord():
 
     Raises: CalledProcessError if calling start.py return a non-zero exit code.
     """
-    subprocess.run(["find", "/etc/"],
-                   stdin=subprocess.PIPE)
+    print("YORIC: Starting supervisord")
+    user = "mx-tester"
+    groups = [g.gr_name for g in grp.getgrall() if user in g.gr_mem]
+    gid = pwd.getpwnam(user).pw_gid
+    groups.append(grp.getgrgid(gid).gr_name)
+    print("YORIC: groups %s " % (groups,))
+    if "sudo" not in groups:
+        raise Error("We're not a sudoer ! %s" % (groups, ))
+    for command in [
+        # Give redis access to its files and directories.
+        "chmod ugo+rx /etc/redis",
+        "chmod ugo+r  /etc/redis/redis.conf",
+        "mkdir -p /var/log/redis",
+        "chmod ugo+rwx /var/log/redis",
+        "mkdir -p /var/lib/redis",
+        "chmod ugo+rwx /var/lib/redis",
 
+        # Give nginx access to its files and directories.
+        "mkdir -p /var/lib/nginx",
+        "mkdir -p /var/log/nginx",
+        "chmod ugo+rwx /var/lib/nginx",
+        "chmod ugo+rwx /var/log/nginx",
+    
+        # Give supervisor access to its files and directories.
+        "mkdir -p /var/log/supervisor",
+        "mkdir -p /etc/supervisor/conf.d",
+        "chmod ugo+rwx /var/log/supervisor",
+        "chmod ugo+rwx /var/run",
+        "chmod ugo+rw /etc/supervisor/conf.d",
+
+        # FIXME: What uses this?
+        "chmod ugo+rw /var/log/journal",
+    ]:
+        os.popen("sudo -S %s"%(command), 'w').write('password')
     subprocess.run(["/usr/bin/supervisord", "--user=mx-tester", "--nodaemon"],
                    stdin=subprocess.PIPE)
 #    subprocess.run(["systemctl", "restart", "supervisor"],

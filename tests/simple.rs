@@ -1,4 +1,4 @@
-use std::{ops::Not, sync::Arc};
+use std::{ops::Not};
 
 use lazy_static::lazy_static;
 use log::{debug, info};
@@ -30,7 +30,7 @@ impl AssignPort for Config {
             }
             debug!("Port {} already occupied, looking for another", port);
         };
-        self.docker.port_mapping.get_mut(0).unwrap().host = port;
+        self.homeserver.host_port = port;
         self.homeserver.server_name = format!("localhost:{}", port);
         self.homeserver.public_baseurl = format!("http://localhost:{}", port);
         self
@@ -38,7 +38,7 @@ impl AssignPort for Config {
 }
 
 /// Simple test: empty config.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_simple() {
     let _ = env_logger::builder().is_test(true).try_init();
     let docker = DOCKER.clone();
@@ -216,37 +216,6 @@ async fn test_repeat() {
     }
 }
 
-/// Cleanup any Docker images in case we stop early.
-struct Cleanup {
-    setup_container_name: Arc<str>,
-    run_container_name: Arc<str>,
-}
-impl Cleanup {
-    fn new(config: &Config) -> Self {
-        Cleanup {
-            setup_container_name: config.setup_container_name().into(),
-            run_container_name: config.run_container_name().into(),
-        }
-    }
-}
-impl Drop for Cleanup {
-    fn drop(&mut self) {
-        let docker = DOCKER.clone();
-        let setup_container_name = self.setup_container_name.clone();
-        let run_container_name = self.run_container_name.clone();
-        tokio::task::block_in_place(move || {
-            tokio::runtime::Handle::current().block_on(async move {
-                debug!("Test cleanup...");
-                let _ = docker.stop_container(&setup_container_name, None).await;
-                let _ = docker.remove_container(&setup_container_name, None).await;
-                let _ = docker.stop_container(&run_container_name, None).await;
-                let _ = docker.remove_container(&run_container_name, None).await;
-                debug!("Test cleanup... DONE");
-            });
-        });
-    }
-}
-
 /// Simple test: spawn workers, do nothing else.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_workers_simple() {
@@ -255,9 +224,9 @@ async fn test_workers_simple() {
     let config = Config::builder()
         .name("test-simple-workers".into())
         .workers(true)
+        .autoclean_on_error(false) // FIXME: That's just for debugging!
         .build()
         .assign_port();
-    let _ = Cleanup::new(&config);
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
