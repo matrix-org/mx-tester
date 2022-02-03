@@ -1,6 +1,6 @@
-use std::sync::Arc;
-use log::debug;
 use crate::Config;
+use log::debug;
+use std::sync::Arc;
 
 /// Cleanup any Docker images at the end of the test,
 /// even in case of panic.
@@ -29,7 +29,8 @@ impl Drop for Cleanup {
         if !self.is_armed {
             return;
         }
-        let docker = bollard::Docker::connect_with_local_defaults().expect("Failed to connect to Docker daemon");
+        let docker = bollard::Docker::connect_with_local_defaults()
+            .expect("Failed to connect to Docker daemon");
         let setup_container_name = self.setup_container_name.clone();
         let run_container_name = self.run_container_name.clone();
         tokio::task::block_in_place(move || {

@@ -1,4 +1,4 @@
-use std::{ops::Not};
+use std::ops::Not;
 
 use lazy_static::lazy_static;
 use log::{debug, info};

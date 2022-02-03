@@ -111,7 +111,7 @@ pub struct DockerConfig {
     pub hostname: String,
 
     /// The docker port mapping configuration to use for the synapse container.
-    /// 
+    ///
     /// When generating the Docker image and the Synapse configuration,
     /// we automatically add a mapping 8008 -> `homeserver_config.host_port`.
     #[serde(default = "DockerConfig::default_port_mapping")]
@@ -257,7 +257,7 @@ pub struct Config {
     pub workers: bool,
 
     #[serde(default = "util::true_")]
-    #[builder(default=true)]
+    #[builder(default = true)]
     /// Specify whether workers should be used.
     ///
     /// May be overridden from the command-line.
@@ -317,29 +317,29 @@ impl Config {
 
         // Make sure that we listen on the appropriate port.
         // For some reason, `start.py generate` tends to put port 4153 instead of 8008.
-        let listeners = combined_config.entry(LISTENERS.into())
+        let listeners = combined_config
+            .entry(LISTENERS.into())
             .or_insert_with(|| yaml!([]));
-        *listeners = yaml!([
-            yaml!({
-                "port" => if self.workers { HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT } else { HARDCODED_GUEST_PORT },
-                "tls" => false,
-                "type" => "http",
-                "bind_addresses" => yaml!(["::"]),
-                "x_forwarded" => false,
-                "resources" => yaml!([
-                    yaml!({
-                        "names" => yaml!(["client"]),
-                        "compress" => true
-                    }),
-                    yaml!({
-                        "names" => yaml!(["federation"]),
-                        "compress" => false
-                    })
-                ]),
-            })
-        ]);
+        *listeners = yaml!([yaml!({
+            "port" => if self.workers { HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT } else { HARDCODED_GUEST_PORT },
+            "tls" => false,
+            "type" => "http",
+            "bind_addresses" => yaml!(["::"]),
+            "x_forwarded" => false,
+            "resources" => yaml!([
+                yaml!({
+                    "names" => yaml!(["client"]),
+                    "compress" => true
+                }),
+                yaml!({
+                    "names" => yaml!(["federation"]),
+                    "compress" => false
+                })
+            ]),
+        })]);
         // Copy modules config.
-        let modules_root = combined_config.entry(MODULES.into())
+        let modules_root = combined_config
+            .entry(MODULES.into())
             .or_insert_with(|| yaml!([]))
             .to_seq_mut()
             .ok_or_else(|| anyhow!("In homeserver.yaml, expected a sequence for key `modules`"))?;
@@ -350,22 +350,28 @@ impl Config {
         if self.workers {
             for (key, value) in std::array::IntoIter::new([
                 // No worker support without redis.
-                ("redis", yaml!({
-                    "enabled" => true,
-                })),
+                (
+                    "redis",
+                    yaml!({
+                        "enabled" => true,
+                    }),
+                ),
                 // No worker support without postgresql
-                ("database", yaml!({
-                    "name" => "psycopg2",
-                    "txn_limit" => 10_000,
-                    "args" => yaml!({
-                        "user" => "synapse",
-                        "password" => "password",
-                        "host" => "localhost",
-                        "port" => 5432,
-                        "cp_min" => 5,
-                        "cp_max" => 10
-                    })
-                })),
+                (
+                    "database",
+                    yaml!({
+                        "name" => "psycopg2",
+                        "txn_limit" => 10_000,
+                        "args" => yaml!({
+                            "user" => "synapse",
+                            "password" => "password",
+                            "host" => "localhost",
+                            "port" => 5432,
+                            "cp_min" => 5,
+                            "cp_max" => 10
+                        })
+                    }),
+                ),
                 // Deactivate a few features in the main process
                 // and let a worker take over them.
                 ("notify_appservices", yaml!(false)),
@@ -373,9 +379,10 @@ impl Config {
                 ("update_user_directory", yaml!(false)),
                 ("start_pushers", yaml!(false)),
                 ("url_preview_enabled", yaml!(false)),
-                ("url_preview_ip_range_blacklist", yaml!([
-                    "255.255.255.255/32",
-                ])),
+                (
+                    "url_preview_ip_range_blacklist",
+                    yaml!(["255.255.255.255/32",]),
+                ),
                 // Also, let's get rid of that warning, it pollutes logs.
                 ("suppress_key_server_warning", yaml!(true)),
             ]) {
@@ -386,12 +393,16 @@ impl Config {
             //
             // Note: In future versions, we might decide to only patch specific workers.
             let conf_path = self.synapse_workers_dir().join("shared.yaml");
-            let conf_file = std::fs::File::open(&conf_path)
-                .with_context(|| format!("Could not open workers shared config: {:?}", conf_path))?;
+            let conf_file = std::fs::File::open(&conf_path).with_context(|| {
+                format!("Could not open workers shared config: {:?}", conf_path)
+            })?;
             let mut config: serde_yaml::Mapping = serde_yaml::from_reader(&conf_file)
-                .with_context(|| format!("Could not parse workers shared config: {:?}", conf_path))?;
+                .with_context(|| {
+                    format!("Could not parse workers shared config: {:?}", conf_path)
+                })?;
 
-            let modules_root = config.entry(MODULES.into())
+            let modules_root = config
+                .entry(MODULES.into())
                 .or_insert_with(|| yaml!([]))
                 .to_seq_mut()
                 .ok_or_else(|| anyhow!("In shared.yaml, expected a sequence for key `modules`"))?;
@@ -402,22 +413,26 @@ impl Config {
             for (key, value) in std::array::IntoIter::new([
                 // Disable url_preview_enabled.
                 ("url_preview_enabled", yaml!(false)),
-                ("url_preview_ip_range_blacklist", yaml!([
-                    "255.255.255.255/32"
-                ])),
+                (
+                    "url_preview_ip_range_blacklist",
+                    yaml!(["255.255.255.255/32"]),
+                ),
                 // No worker without postgres.
-                ("database", yaml!({
-                    "name" => "psycopg2",
-                    "txn_limit" => 10_000,
-                    "args" => yaml!({
-                        "user" => "synapse",
-                        "password" => "password",
-                        "host" => "localhost",
-                        "port" => 5432,
-                        "cp_min" => 5,
-                        "cp_max" => 10
-                    })
-                })),                
+                (
+                    "database",
+                    yaml!({
+                        "name" => "psycopg2",
+                        "txn_limit" => 10_000,
+                        "args" => yaml!({
+                            "user" => "synapse",
+                            "password" => "password",
+                            "host" => "localhost",
+                            "port" => 5432,
+                            "cp_min" => 5,
+                            "cp_max" => 10
+                        })
+                    }),
+                ),
             ]) {
                 config.insert(yaml!(key), value);
             }
@@ -482,12 +497,20 @@ impl Config {
 
     /// The name for the container we're using to setup Synapse.
     pub fn setup_container_name(&self) -> String {
-        format!("mx-tester-synapse-setup-{}{}", self.name, if self.workers { "-workers" } else { "" })
+        format!(
+            "mx-tester-synapse-setup-{}{}",
+            self.name,
+            if self.workers { "-workers" } else { "" }
+        )
     }
 
     /// The name for the container we're using to actually run Synapse.
     pub fn run_container_name(&self) -> String {
-        format!("mx-tester-synapse-run-{}{}", self.name, if self.workers { "-workers" } else { "" })
+        format!(
+            "mx-tester-synapse-run-{}{}",
+            self.name,
+            if self.workers { "-workers" } else { "" }
+        )
     }
 }
 
@@ -684,19 +707,22 @@ async fn start_synapse_container(
         // Generate configuration to open and map ports.
         let mut host_port_bindings = HashMap::new();
         let mut exposed_ports = HashMap::new();
-        for mapping in config.docker.port_mapping.iter().chain([
-                PortMapping {
-                    host: config.homeserver.host_port,
-                    guest: HARDCODED_GUEST_PORT
-                }
-            ].iter()) {
-                let key = format!("{}/tcp", mapping.guest);
-                host_port_bindings.insert(key.clone(),
+        for mapping in config.docker.port_mapping.iter().chain(
+            [PortMapping {
+                host: config.homeserver.host_port,
+                guest: HARDCODED_GUEST_PORT,
+            }]
+            .iter(),
+        ) {
+            let key = format!("{}/tcp", mapping.guest);
+            host_port_bindings.insert(
+                key.clone(),
                 Some(vec![PortBinding {
                     host_port: Some(format!("{}", mapping.host)),
                     ..PortBinding::default()
-                }]));
-                exposed_ports.insert(key.clone(), HashMap::new());
+                }]),
+            );
+            exposed_ports.insert(key.clone(), HashMap::new());
         }
         debug!("port_bindings: {:#?}", host_port_bindings);
 
@@ -728,10 +754,7 @@ async fn start_synapse_container(
                         // Mount guest directories as host directories.
                         binds: Some(vec![
                             // Synapse logs, etc.
-                            format!(
-                                "{}:/data:rw",
-                                data_dir.as_os_str().to_string_lossy()
-                            ),
+                            format!("{}:/data:rw", data_dir.as_os_str().to_string_lossy()),
                             // Everything below this point is for workers.
                             format!(
                                 "{}:/conf/workers:rw",
@@ -773,8 +796,8 @@ async fn start_synapse_container(
                             ("/etc/nginx/conf.d".to_string(), HashMap::new()),
                             ("/etc/supervisor/conf.d".to_string(), HashMap::new()),
                         ]
-                            .into_iter()
-                            .collect(),
+                        .into_iter()
+                        .collect(),
                     ),
                     tty: Some(false),
                     #[cfg(unix)]
@@ -844,7 +867,12 @@ async fn start_synapse_container(
         let mut log_file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(config.logs_dir().join("docker").join(format!("{}.log", if detach { "up" } else { "build" })))
+            .open(
+                config
+                    .logs_dir()
+                    .join("docker")
+                    .join(format!("{}.log", if detach { "up" } else { "build" })),
+            )
             .await?;
         tokio::task::spawn(async move {
             debug!(target: "mx-tester-log", "Starting log watcher");
@@ -897,7 +925,12 @@ async fn start_synapse_container(
         let mut log_file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(config.logs_dir().join("docker").join(format!("{}.log", if detach { "up" } else { "build" })))
+            .open(
+                config
+                    .logs_dir()
+                    .join("docker")
+                    .join(format!("{}.log", if detach { "up" } else { "build" })),
+            )
             .await?;
         tokio::task::spawn(async move {
             debug!(target: "synapse", "Launching Synapse container");
@@ -952,7 +985,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Could not create directory {:#?}", dir,))?;
     }
-    
+
     // Build modules
     let mut env = config.shared_env_variables()?;
     for module in &config.modules {
@@ -978,19 +1011,41 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
             // These files are used by `workers_start.py` to generate worker configuration.
             // They have been copied manually from Synapse's git repo.
             // Hopefully, in the future, Synapse+worker images will be available on DockerHub.
-            (conf_dir.join("worker.yaml.j2"), include_str!("../res/workers/worker.yaml.j2")),
-            (conf_dir.join("shared.yaml.j2"), include_str!("../res/workers/shared.yaml.j2")),
-            (conf_dir.join("supervisord.conf.j2"), include_str!("../res/workers/supervisord.conf.j2")),
-            (conf_dir.join("nginx.conf.j2"), include_str!("../res/workers/nginx.conf.j2")),
-            (conf_dir.join("log.config"), include_str!("../res/workers/log.config")),
+            (
+                conf_dir.join("worker.yaml.j2"),
+                include_str!("../res/workers/worker.yaml.j2"),
+            ),
+            (
+                conf_dir.join("shared.yaml.j2"),
+                include_str!("../res/workers/shared.yaml.j2"),
+            ),
+            (
+                conf_dir.join("supervisord.conf.j2"),
+                include_str!("../res/workers/supervisord.conf.j2"),
+            ),
+            (
+                conf_dir.join("nginx.conf.j2"),
+                include_str!("../res/workers/nginx.conf.j2"),
+            ),
+            (
+                conf_dir.join("log.config"),
+                include_str!("../res/workers/log.config"),
+            ),
             // workers_start.py is adapted from Synapse's git repo.
-            (synapse_root.join("workers_start.py"), include_str!("../res/workers/workers_start.py")),
+            (
+                synapse_root.join("workers_start.py"),
+                include_str!("../res/workers/workers_start.py"),
+            ),
             // ...
-            (conf_dir.join("postgres.sql"), include_str!("../res/workers/postgres.sql")),
+            (
+                conf_dir.join("postgres.sql"),
+                include_str!("../res/workers/postgres.sql"),
+            ),
         ];
         for (path, content) in &data {
-            std::fs::write(&path, content)
-                .with_context(|| format!("Could not inject worker configuration file {:?}", path))?;
+            std::fs::write(&path, content).with_context(|| {
+                format!("Could not inject worker configuration file {:?}", path)
+            })?;
         }
     }
 
@@ -1109,10 +1164,7 @@ RUN chown mx-tester /workers_start.py
         while let Some(result) = stream.next().await {
             let info = result.context("Daemon `docker build` indicated an error")?;
             if let Some(ref error) = info.error {
-                return Err(anyhow!(
-                    "Error while building an image: {}",
-                    error,
-                ));
+                return Err(anyhow!("Error while building an image: {}", error,));
             }
             debug!("Build image progress {:#?}", info);
         }

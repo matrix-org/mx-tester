@@ -140,7 +140,7 @@ async fn main() {
     config.workers = workers;
     if let Some(synapse_tag) = matches.value_of("synapse-tag") {
         config.synapse = SynapseVersion::Docker {
-            tag: format!("matrixdotorg/synapse:{}", synapse_tag)
+            tag: format!("matrixdotorg/synapse:{}", synapse_tag),
         };
     }
 
