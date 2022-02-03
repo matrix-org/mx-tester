@@ -64,7 +64,8 @@ async fn test_simple() {
         .expect("Failed in step `down`");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+
 async fn test_create_users() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -196,7 +197,8 @@ async fn test_create_users() {
 /// Simple test: repeat numerous times up/down, to increase the
 /// chances of hitting one the cases in which Synapse fails
 /// during startup.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+
 async fn test_repeat() {
     let _ = env_logger::builder().is_test(true).try_init();
     let docker = DOCKER.clone();
