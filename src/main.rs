@@ -81,7 +81,7 @@ async fn main() {
                 .long("workers")
                 .takes_value(false)
                 .required(false)
-                .help("If specified, use workerized Synapse (default: none)")
+                .help("If specified, use workerized Synapse (default: no workers)")
         )
         .arg(
             Arg::new("synapse-tag")
@@ -137,7 +137,7 @@ async fn main() {
         config.directories.root = std::path::Path::new(root).to_path_buf()
     }
     let workers = matches.is_present("workers");
-    config.workers = workers;
+    config.enable_workers = workers;
     if let Some(synapse_tag) = matches.value_of("synapse-tag") {
         config.synapse = SynapseVersion::Docker {
             tag: format!("matrixdotorg/synapse:{}", synapse_tag),

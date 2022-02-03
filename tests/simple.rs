@@ -1,8 +1,13 @@
+//! A number of simple tests (i.e. modules are not tested) on mx-tester.
+//!
+//! Each test needs to use #[tokio::test(flavor = "multi_thread")], as this
+//! is needed for auto-cleanup in case of failure.
+
 use std::ops::Not;
 
 use lazy_static::lazy_static;
 use log::{debug, info};
-use mx_tester::{self, registration::User, *};
+use mx_tester::{self, cleanup::Cleanup, registration::User, *};
 
 lazy_static! {
     static ref DOCKER: bollard::Docker =
@@ -30,9 +35,7 @@ impl AssignPort for Config {
             }
             debug!("Port {} already occupied, looking for another", port);
         };
-        self.homeserver.host_port = port;
-        self.homeserver.server_name = format!("localhost:{}", port);
-        self.homeserver.public_baseurl = format!("http://localhost:{}", port);
+        self.homeserver.set_host_port(port);
         self
     }
 }
@@ -49,6 +52,7 @@ async fn test_simple() {
         })
         .build()
         .assign_port();
+    let _ = Cleanup::new(&config);
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
@@ -89,6 +93,7 @@ async fn test_create_users() {
         ])
         .build()
         .assign_port();
+    let _ = Cleanup::new(&config);
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
@@ -202,6 +207,7 @@ async fn test_repeat() {
         })
         .build()
         .assign_port();
+    let _ = Cleanup::new(&config);
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
@@ -223,9 +229,10 @@ async fn test_workers() {
     let docker = DOCKER.clone();
     let config = Config::builder()
         .name("test-simple-workers".into())
-        .workers(true)
+        .enable_workers(true)
         .build()
         .assign_port();
+    let _ = Cleanup::new(&config);
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");

@@ -87,8 +87,14 @@ const MEMORY_ALLOCATION_BYTES: i64 = 4 * 1024 * 1024 * 1024;
 /// 3. to a synax error or startup error in a module.
 const MAX_SYNAPSE_RESTART_COUNT: i64 = 20;
 
-/// The port used inside Docker.
+/// The port used by the homeserver inside Docker.
+///
+/// In single process mode, that's the port used by Synapse.
+/// In worker mode, that's the port used by nginx as a load-balancer.
 const HARDCODED_GUEST_PORT: u64 = 8008;
+
+/// In worker mode, the port used by the homeserver for the main process
+/// inside Docker.
 const HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT: u64 = 8080;
 
 /// A port in the container made accessible on the host machine.
@@ -113,27 +119,21 @@ pub struct DockerConfig {
     /// The docker port mapping configuration to use for the synapse container.
     ///
     /// When generating the Docker image and the Synapse configuration,
-    /// we automatically add a mapping 8008 -> `homeserver_config.host_port`.
-    #[serde(default = "DockerConfig::default_port_mapping")]
-    #[builder(default = DockerConfig::default_port_mapping())]
+    /// we automatically add a mapping HARDCODED_GUEST_PORT -> `homeserver_config.host_port`.
+    #[serde(default)]
+    #[builder(default = vec![])]
     pub port_mapping: Vec<PortMapping>,
 }
 
 impl Default for DockerConfig {
     fn default() -> DockerConfig {
-        DockerConfig {
-            hostname: Self::default_hostname(),
-            port_mapping: Self::default_port_mapping(),
-        }
+        Self::builder().build()
     }
 }
 
 impl DockerConfig {
     fn default_hostname() -> String {
         "synapse".to_string()
-    }
-    fn default_port_mapping() -> Vec<PortMapping> {
-        vec![]
     }
 }
 
@@ -175,6 +175,12 @@ impl Default for HomeserverConfig {
 }
 
 impl HomeserverConfig {
+    /// Set the port, resetting the public base url.
+    pub fn set_host_port(&mut self, port: u64) {
+        self.host_port = port;
+        self.server_name = format!("localhost:{}", port);
+        self.public_baseurl = format!("http://localhost:{}", port);
+    }
     pub fn host_port_default() -> u64 {
         9999
     }
@@ -254,7 +260,7 @@ pub struct Config {
     /// Specify whether workers should be used.
     ///
     /// May be overridden from the command-line.
-    pub workers: bool,
+    pub enable_workers: bool,
 
     #[serde(default = "util::true_")]
     #[builder(default = true)]
@@ -316,12 +322,12 @@ impl Config {
         }
 
         // Make sure that we listen on the appropriate port.
-        // For some reason, `start.py generate` tends to put port 4153 instead of 8008.
+        // For some reason, `start.py generate` tends to put port 4153 instead of HARDCODED_GUEST_PORT.
         let listeners = combined_config
             .entry(LISTENERS.into())
             .or_insert_with(|| yaml!([]));
         *listeners = yaml!([yaml!({
-            "port" => if self.workers { HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT } else { HARDCODED_GUEST_PORT },
+            "port" => if self.enable_workers { HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT } else { HARDCODED_GUEST_PORT },
             "tls" => false,
             "type" => "http",
             "bind_addresses" => yaml!(["::"]),
@@ -347,7 +353,7 @@ impl Config {
             modules_root.push(module.config.clone());
         }
 
-        if self.workers {
+        if self.enable_workers {
             for (key, value) in std::array::IntoIter::new([
                 // No worker support without redis.
                 (
@@ -455,37 +461,42 @@ impl Config {
         self.directories.root.join(&self.name)
     }
 
-    /// The directory in which we're putting synapse data for this test.
-    ///
-    /// It will contain, among other things, the logs for the test.
+    /// The directory in which we're putting everything related to synapse data for this test.
     pub fn synapse_root(&self) -> PathBuf {
         self.test_root().join("synapse")
     }
 
+    /// The directory in which Synapse may write data.
     pub fn synapse_data_dir(&self) -> PathBuf {
         self.synapse_root().join("data")
     }
 
+    /// The directory in which we're putting the configuration of workers for this test.
     pub fn synapse_workers_dir(&self) -> PathBuf {
-        self.test_root().join("workers")
+        self.synapse_root().join("workers")
     }
 
+    /// The directory in which we're putting files that go to subdirectories of /etc in
+    /// in the guest.
     pub fn etc_dir(&self) -> PathBuf {
         self.test_root().join("etc")
     }
 
+    /// The directory in which we publish logs.
     pub fn logs_dir(&self) -> PathBuf {
         self.test_root().join("logs")
     }
 
     /// A tag for the Docker image we're creating/using.
     pub fn tag(&self) -> String {
-        match (&self.synapse, self.workers) {
-            (SynapseVersion::Docker { ref tag }, false) => {
-                format!("mx-tester-synapse-{}-{}", tag, self.name)
-            }
-            (SynapseVersion::Docker { ref tag }, true) => {
-                format!("mx-tester-synapse-{}-{}-workers", tag, self.name)
+        match self.synapse {
+            SynapseVersion::Docker { ref tag } => {
+                format!(
+                    "mx-tester-synapse-{}-{}{workers}",
+                    tag,
+                    self.name,
+                    workers = if self.enable_workers { "-workers" } else { "" }
+                )
             }
         }
     }
@@ -500,7 +511,7 @@ impl Config {
         format!(
             "mx-tester-synapse-setup-{}{}",
             self.name,
-            if self.workers { "-workers" } else { "" }
+            if self.enable_workers { "-workers" } else { "" }
         )
     }
 
@@ -509,7 +520,7 @@ impl Config {
         format!(
             "mx-tester-synapse-run-{}{}",
             self.name,
-            if self.workers { "-workers" } else { "" }
+            if self.enable_workers { "-workers" } else { "" }
         )
     }
 }
@@ -685,18 +696,19 @@ async fn start_synapse_container(
         "SYNAPSE_CONFIG_DIR=/data".into(),
         format!(
             "SYNAPSE_HTTP_PORT={}",
-            if config.workers {
+            if config.enable_workers {
                 HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT
             } else {
                 HARDCODED_GUEST_PORT
             }
         ),
     ];
-    if config.workers {
+    if config.enable_workers {
         // The list of workers to launch, as copied from Complement.
         // It has two instances of `event_persister` by design, in order
         // to launch two event persisters.
         env.push("SYNAPSE_WORKER_TYPES=event_persister, event_persister, background_worker, frontend_proxy, event_creator, user_dir, media_repository, federation_inbound, federation_reader, federation_sender, synchrotron, appservice, pusher".to_string());
+        env.push("SYNAPSE_WORKERS_WRITE_LOGS_TO_DISK=1".to_string());
     }
     let env = env;
     if is_container_created {
@@ -863,7 +875,6 @@ async fn start_synapse_container(
         );
 
         // Write logs to the synapse data directory.
-
         let mut log_file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -925,12 +936,10 @@ async fn start_synapse_container(
         let mut log_file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(
-                config
-                    .logs_dir()
-                    .join("docker")
-                    .join(format!("{}.log", if detach { "up" } else { "build" })),
-            )
+            .open(config.logs_dir().join("docker").join(format!(
+                "{}.stdout.log",
+                if detach { "up" } else { "build" }
+            )))
             .await?;
         tokio::task::spawn(async move {
             debug!(target: "synapse", "Launching Synapse container");
@@ -1003,7 +1012,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     }
 
     // Prepare resource files.
-    if config.workers {
+    if config.enable_workers {
         let conf_dir = synapse_root.join("conf");
         std::fs::create_dir_all(&conf_dir)
             .context("Could not create directory for worker configuration file")?;
@@ -1036,7 +1045,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
                 synapse_root.join("workers_start.py"),
                 include_str!("../res/workers/workers_start.py"),
             ),
-            // ...
+            // setup postgres user and database
             (
                 conf_dir.join("postgres.sql"),
                 include_str!("../res/workers/postgres.sql"),
@@ -1079,8 +1088,6 @@ RUN mkdir /mx-tester
 
 ENTRYPOINT []
 
-# This environment variable will 
-ENV SYNAPSE_HTTP_PORT={synapse_http_port}
 EXPOSE {synapse_http_port}/tcp 8009/tcp 8448/tcp
 ",
     docker_tag = docker_tag,
@@ -1092,17 +1099,12 @@ EXPOSE {synapse_http_port}/tcp 8009/tcp 8448/tcp
         .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
         .format("\n"),
     uid=nix::unistd::getuid(),
-    synapse_http_port = if config.workers {
-        HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT
-    } else {
-        HARDCODED_GUEST_PORT
-    },
+    synapse_http_port = HARDCODED_GUEST_PORT,
     maybe_setup_workers =
-    if config.workers {
+    if config.enable_workers {
 "
 # Install dependencies
-RUN apt-get update
-RUN apt-get install -y postgresql postgresql-client-13 supervisor redis nginx sudo
+RUN apt-get update && apt-get install -y postgresql postgresql-client-13 supervisor redis nginx sudo
 
 # For workers, we're not using start.py but workers_start.py
 # (which does call start.py, but that's a long story).
@@ -1111,8 +1113,7 @@ COPY conf/* /conf/
 
 # We're not going to be running workers_start.py as root, so
 # let's make sure that it *can* run, write to /etc/nginx & co.
-RUN chmod ugo+rx /workers_start.py
-RUN chown mx-tester /workers_start.py
+RUN chmod ugo+rx /workers_start.py && chown mx-tester /workers_start.py
 "
     } else {
         ""
@@ -1238,7 +1239,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         docker,
         config,
         &setup_container_name,
-        if config.workers {
+        if config.enable_workers {
             vec!["/workers_start.py".to_string(), "generate".to_string()]
         } else {
             vec!["/start.py".to_string(), "generate".to_string()]
@@ -1278,7 +1279,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         docker,
         config,
         &run_container_name,
-        if config.workers {
+        if config.enable_workers {
             vec!["/workers_start.py".to_string(), "start".to_string()]
         } else {
             vec!["/start.py".to_string()]

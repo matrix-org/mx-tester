@@ -13,6 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# This file is adapted from [configure_workers_and_start.py](https://github.com/matrix-org/synapse/blob/develop/docker/configure_workers_and_start.py),
+# With the following main differences:
+#
+# 1. Where `configure_workers_and_start.py` is designed to be launched exactly once,
+#   to both configure workers then launch them, `workers_start.py` is designed to
+#   be launched twice:
+#    1. Once to generate configuration files (that may later be patched by mx-tester.yml)
+#    2. A second time to setup directories and actually launch supervisord, etc.
+# 2. Where `configure_workers_and_start.py` is designed to be launched as `root`,
+#   this is not acceptable for `mx-tester`, as this would mean leaving files that
+#   belong to `root` on the disk of a user who doesn't have the necessary rights
+#   to remove these files. Rather:
+#    1. mx-tester creates a guest user `mx-tester` and maps this user to the host
+#       user launching the tests, to ensure that any file left on disk will belong
+#       to that user;
+#    2. `workers_start.py` uses `sudo` to create the necessary directories and
+#       allow user `mx-tester` to access them.
+
 # This script reads environment variables and generates a shared Synapse worker,
 # nginx and supervisord configs depending on the workers requested.
 #
@@ -21,15 +39,11 @@
 #   * SYNAPSE_REPORT_STATS: Whether to report stats.
 #   * SYNAPSE_WORKER_TYPES: A comma separated list of worker names as specified in WORKER_CONFIG
 #         below. Leave empty for no workers, or set to '*' for all possible workers.
-#
-# NOTE: According to Complement's ENTRYPOINT expectations for a homeserver image (as defined
-# in the project's README), this script may be run multiple times, and functionality should
-# continue to work if so.
+#   * SYNAPSE_WORKERS_WRITE_LOGS_TO_DISK: see start.py
+#   * SYNAPSE_CONFIG_DIR: see start.py
+#   * SYNAPSE_HTTP_PORT: see start.py
 
-import getpass
-import grp
 import os
-import pwd 
 import subprocess
 import sys
 
@@ -230,7 +244,6 @@ def convert(src: str, dst: str, **template_vars):
         dst: Path to write to.
         template_vars: The arguments to replace placeholder variables in the template with.
     """
-    print("YORIC: Generating conf %s" % (dst, ))
     # Read the template file
     with open(src) as infile:
         template = infile.read()
@@ -249,8 +262,6 @@ def convert(src: str, dst: str, **template_vars):
         outfile.write("\n")
 
         outfile.write(rendered)
-    print("YORIC: Generating conf %s... DONE" % (dst, ))
-
 
 def add_sharding_to_shared_config(
     shared_config: dict,
@@ -383,7 +394,6 @@ def generate_worker_files(environ, config_path: str, data_dir: str):
     else:
         # Split type names by comma
         worker_types = worker_types.split(",")
-    print("YORIC: worker_types %s" % (worker_types, ))
 
     # Create the worker configuration directory if it doesn't already exist
     os.makedirs("/conf/workers", exist_ok=True)
@@ -542,7 +552,7 @@ def start_supervisord():
         "mkdir -p /var/lib/redis",
         "chmod ugo+rwx /var/lib/redis",
 
-        # Remove Give nginx access to its files and directories,
+        # Give nginx access to its files and directories,
         # remove its default sites.
         "rm /etc/nginx/sites-enabled/default",
         "mkdir -p /var/lib/nginx",
@@ -567,15 +577,10 @@ def start_supervisord():
         os.popen("sudo -S %s"%(command), 'w').write('password')
     subprocess.run(["/usr/bin/supervisord", "--user=mx-tester", "--nodaemon"],
                    stdin=subprocess.PIPE)
-#    subprocess.run(["systemctl", "restart", "supervisor"],
-#                   stdin=subprocess.PIPE)
-
 
 def main(args, environ):
     should_configure = False
     should_start = False
-    print("YORIC: workers_start %s => %s" % (args, environ))
-    print("YORIC: user %s: %s" % (os.getuid(), getpass.getuser()))
     if len(args) == 1:
         # No argument startup, as expected by Complement.
         should_configure = True

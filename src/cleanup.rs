@@ -1,15 +1,24 @@
 use crate::Config;
-use log::debug;
+use log::warn;
 use std::sync::Arc;
 
-/// Cleanup any Docker images at the end of the test,
+/// Cleanup any Docker images at the end of a block,
 /// even in case of panic.
 ///
-/// To use it, you need to prefix tests with
+/// This reduces the chances that Docker will assume
+/// that the images must be restarted on your next computer
+/// startup and decide to bring them up as `root`.
+///
+/// As a side-effect, all tests MUST be prefixed with
 /// `#[tokio::test(flavor = "multi_thread")]`
 pub struct Cleanup {
+    /// If `true`, cleanup is still needed.
     is_armed: bool,
+
+    /// The container name used during `build`.
     setup_container_name: Arc<str>,
+
+    /// The container name used during `up` and `run`.
     run_container_name: Arc<str>,
 }
 impl Cleanup {
@@ -20,6 +29,10 @@ impl Cleanup {
             run_container_name: config.run_container_name().into(),
         }
     }
+
+    /// Disarm this guard.
+    ///
+    /// Once disarmed, it will not cause cleanup anymore when it leaves scope.
     pub fn disarm(mut self) {
         self.is_armed = false;
     }
@@ -35,25 +48,34 @@ impl Drop for Cleanup {
         let run_container_name = self.run_container_name.clone();
         tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
-                debug!("Test cleanup...");
+                warn!("Auto-cleanup...");
                 let _ = docker.stop_container(&setup_container_name, None).await;
                 let _ = docker.remove_container(&setup_container_name, None).await;
                 let _ = docker.stop_container(&run_container_name, None).await;
                 let _ = docker.remove_container(&run_container_name, None).await;
-                debug!("Test cleanup... DONE");
+                warn!("Auto-cleanup... DONE");
             });
         });
     }
 }
 
+/// A utility trait used to call `foo.disarm()` on a container
+/// holding an instance of `Cleanup`.
+///
+/// The main utility at the time of this writing is to be able
+/// to disarm a `Option<Cleanup>`.
 pub trait Disarm {
     fn disarm(self);
 }
-
-impl Disarm for Option<Cleanup> {
+impl<T> Disarm for T
+where
+    T: IntoIterator<Item = Cleanup>,
+{
     fn disarm(self) {
-        if let Some(cleanup) = self {
-            cleanup.disarm();
+        for item in self {
+            // In case of panic during a call to `disarm()`,
+            // the remaining items will be auto-cleaned up.
+            item.disarm();
         }
     }
 }

@@ -210,6 +210,12 @@ credentials:
   # Optional. Specify a server to connect to the registry.
   # Default: No server.
   # May be overridden from the command-line with parameter `--server`.
+
+# Optional
+enable_workers:
+  # A boolean. Specify `true` to launch Synapse with workers.
+  # Default: No workers.
+  # May be overridden from the command-line with parameter `--workers`.
 ```
 
 # Docker notes
