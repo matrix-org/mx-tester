@@ -218,13 +218,12 @@ async fn test_repeat() {
 
 /// Simple test: spawn workers, do nothing else.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_workers_simple() {
+async fn test_workers() {
     let _ = env_logger::builder().is_test(true).try_init();
     let docker = DOCKER.clone();
     let config = Config::builder()
         .name("test-simple-workers".into())
         .workers(true)
-        .autoclean_on_error(false) // FIXME: That's just for debugging!
         .build()
         .assign_port();
     mx_tester::build(&docker, &config)

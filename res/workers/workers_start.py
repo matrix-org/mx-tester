@@ -533,14 +533,6 @@ def start_supervisord():
 
     Raises: CalledProcessError if calling start.py return a non-zero exit code.
     """
-    print("YORIC: Starting supervisord")
-    user = "mx-tester"
-    groups = [g.gr_name for g in grp.getgrall() if user in g.gr_mem]
-    gid = pwd.getpwnam(user).pw_gid
-    groups.append(grp.getgrgid(gid).gr_name)
-    print("YORIC: groups %s " % (groups,))
-    if "sudo" not in groups:
-        raise Error("We're not a sudoer ! %s" % (groups, ))
     for command in [
         # Give redis access to its files and directories.
         "chmod ugo+rx /etc/redis",

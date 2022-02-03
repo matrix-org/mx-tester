@@ -316,33 +316,11 @@ impl Config {
         }
 
         // Make sure that we listen on the appropriate port.
+        // For some reason, `start.py generate` tends to put port 4153 instead of 8008.
         let listeners = combined_config.entry(LISTENERS.into())
-            .or_insert_with(|| yaml!([]))
-            .as_sequence_mut()
-            .ok_or_else(|| anyhow!("`listeners` should be a sequence"))?;
-/*
-            // Listen on the hardcoded port.
-        if self.workers {
-            listeners.push(yaml!({
-                "port" => HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT,
-                "tls" => false,
-                "type" => "http",
-                "bind_addresses" => yaml!(["::"]),
-                "x_forwarded" => true,
-                "resources" => yaml!([
-                    yaml!({
-                        "names" => yaml!(["client"]),
-                        "compress" => true
-                    }),
-                    yaml!({
-                        "names" => yaml!(["federation"]),
-                        "compress" => false
-                    })
-                ]),
-            }));
-        } else {
-            listeners.push(yaml!({
-                "port" => HARDCODED_GUEST_PORT,
+            .or_insert_with(|| yaml!([]));
+        *listeners = yaml!([yaml!({
+                "port" => if self.workers { HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT } else { HARDCODED_GUEST_PORT },
                 "tls" => false,
                 "type" => "http",
                 "bind_addresses" => yaml!(["::"]),
@@ -357,9 +335,8 @@ impl Config {
                         "compress" => false
                     })
                 ]),
-            }));
-        }
-*/
+            })
+        ]);
         // Copy modules config.
         let modules_root = combined_config.entry(MODULES.into())
             .or_insert_with(|| yaml!([]))
@@ -474,12 +451,12 @@ impl Config {
 
     /// The name for the container we're using to setup Synapse.
     pub fn setup_container_name(&self) -> String {
-        format!("mx-tester-synapse-setup-{}", self.name)
+        format!("mx-tester-synapse-setup-{}{}", self.name, if self.workers { "-workers" } else { "" })
     }
 
     /// The name for the container we're using to actually run Synapse.
     pub fn run_container_name(&self) -> String {
-        format!("mx-tester-synapse-run-{}", self.name)
+        format!("mx-tester-synapse-run-{}{}", self.name, if self.workers { "-workers" } else { "" })
     }
 }
 
@@ -662,8 +639,9 @@ async fn start_synapse_container(
         ),
     ];
     if config.workers {
-        // This list is copied from Complement.
-        // It has two instances of `event_persister` by design.
+        // The list of workers to launch, as copied from Complement.
+        // It has two instances of `event_persister` by design, in order
+        // to launch two event persisters.
         env.push("SYNAPSE_WORKER_TYPES=event_persister, event_persister, background_worker, frontend_proxy, event_creator, user_dir, media_repository, federation_inbound, federation_reader, federation_sender, synchrotron, appservice, pusher".to_string());
     }
     let env = env;
@@ -975,11 +953,6 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
             (conf_dir.join("nginx.conf.j2"), include_str!("../res/workers/nginx.conf.j2")),
             (conf_dir.join("log.config"), include_str!("../res/workers/log.config")),
             (synapse_root.join("workers_start.py"), include_str!("../res/workers/workers_start.py")),
-            // The only mean to chmod /etc/redis/redis.conf to make it readable by non-root
-            // supervisord is to mount /etc/redis from the host. Since this removes the
-            // contents of /etc/redis, we need to copy /etc/redis/redis.conf on top of it.
-            // Luckily, it seems to be a stock config file.
-//            (etc_dir.join("redis").join("redis.conf"), include_str!("../res/workers/redis.conf")),
         ];
         for (path, content) in &data {
             std::fs::write(&path, content)
@@ -997,8 +970,10 @@ VOLUME [\"/data\", \"/conf/workers\", \"/etc/nginx/conf.d\", \"/etc/supervisor/c
 
 # We're not running as root, to avoid messing up with the host
 # filesystem, so we need a proper user.
-# We still need to be able to sudo, to chmod files.
 RUN useradd mx-tester --uid {uid} --groups sudo
+
+# Add a password, to be able to run sudo. We'll use it to
+# chmod files.
 RUN echo \"mx-tester:password\" | chpasswd
 
 # Show the Synapse version, to aid with debugging.
@@ -1012,6 +987,8 @@ RUN mkdir /mx-tester
 {copy}
 
 ENTRYPOINT []
+
+# This environment variable will 
 ENV SYNAPSE_HTTP_PORT={synapse_http_port}
 EXPOSE {synapse_http_port}/tcp 8009/tcp 8448/tcp
 ",
