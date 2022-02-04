@@ -699,7 +699,6 @@ async fn start_synapse_container(
     cmd: Vec<String>,
     detach: bool,
 ) -> Result<(), Error> {
-    let is_container_created = docker.is_container_created(container_name).await?;
     let data_dir = config.synapse_data_dir();
     let data_dir = data_dir.as_path();
 
@@ -724,138 +723,134 @@ async fn start_synapse_container(
         env.push("SYNAPSE_WORKERS_WRITE_LOGS_TO_DISK=1".to_string());
     }
     let env = env;
-    if is_container_created {
-        debug!("NO need to create container for {}", container_name);
-    } else {
-        debug!("We need to create container for {}", container_name);
+    debug!("We need to create container for {}", container_name);
 
-        // Generate configuration to open and map ports.
-        let mut host_port_bindings = HashMap::new();
-        let mut exposed_ports = HashMap::new();
-        for mapping in config.docker.port_mapping.iter().chain(
-            [PortMapping {
-                host: config.homeserver.host_port,
-                guest: HARDCODED_GUEST_PORT,
-            }]
-            .iter(),
-        ) {
-            let key = format!("{}/tcp", mapping.guest);
-            host_port_bindings.insert(
-                key.clone(),
-                Some(vec![PortBinding {
-                    host_port: Some(format!("{}", mapping.host)),
-                    ..PortBinding::default()
-                }]),
-            );
-            exposed_ports.insert(key.clone(), HashMap::new());
-        }
-        debug!("port_bindings: {:#?}", host_port_bindings);
-
-        debug!("Creating container {}", container_name);
-        let response = docker
-            .create_container(
-                Some(CreateContainerOptions {
-                    name: container_name,
-                }),
-                BollardContainerConfig {
-                    env: Some(env.clone()),
-                    exposed_ports: Some(exposed_ports),
-                    hostname: Some(config.docker.hostname.clone()),
-                    host_config: Some(HostConfig {
-                        log_config: Some(HostConfigLogConfig {
-                            typ: Some("json-file".to_string()),
-                            config: None,
-                        }),
-                        // Synapse has a tendency to not start correctly
-                        // or to stop shortly after startup. The following
-                        // restart policy seems to help a lot.
-                        restart_policy: Some(RestartPolicy {
-                            name: Some(RestartPolicyNameEnum::ON_FAILURE),
-                            maximum_retry_count: Some(MAX_SYNAPSE_RESTART_COUNT),
-                        }),
-                        // Extremely large memory allowance.
-                        memory_reservation: Some(MEMORY_ALLOCATION_BYTES),
-                        memory_swap: Some(-1),
-                        // Mount guest directories as host directories.
-                        binds: Some(vec![
-                            // Synapse logs, etc.
-                            format!("{}:/data:rw", data_dir.as_os_str().to_string_lossy()),
-                            // Everything below this point is for workers.
-                            format!(
-                                "{}:/conf/workers:rw",
-                                config.synapse_workers_dir().to_string_lossy()
-                            ),
-                            format!(
-                                "{}:/etc/nginx/conf.d:rw",
-                                config.etc_dir().join("nginx").to_string_lossy()
-                            ),
-                            format!(
-                                "{}:/etc/supervisor/conf.d:rw",
-                                config.etc_dir().join("supervisor").to_string_lossy()
-                            ),
-                            format!(
-                                "{}:/var/log/nginx:rw",
-                                config.logs_dir().join("nginx").to_string_lossy()
-                            ),
-                        ]),
-                        // Expose guest port `guest_mapping` as `host_mapping`.
-                        port_bindings: Some(host_port_bindings),
-                        // Enable access to host as `host.docker.internal` from the guest.
-                        // On macOS and Windows, this is expected to be transparent but
-                        // on Linux, an option needs to be added.
-                        #[cfg(target_os = "linux")]
-                        extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
-                        ..HostConfig::default()
-                    }),
-                    image: Some(config.tag()),
-                    attach_stderr: Some(true),
-                    attach_stdout: Some(true),
-                    attach_stdin: Some(false),
-                    cmd: Some(cmd.clone()),
-                    // Specify that a few directories may be mounted.
-                    // The empty hashmap... is an oddity of the Docker Engine API.
-                    volumes: Some(
-                        vec![
-                            ("/data".to_string(), HashMap::new()),
-                            ("/conf/workers".to_string(), HashMap::new()),
-                            ("/etc/nginx/conf.d".to_string(), HashMap::new()),
-                            ("/etc/supervisor/conf.d".to_string(), HashMap::new()),
-                        ]
-                        .into_iter()
-                        .collect(),
-                    ),
-                    tty: Some(false),
-                    #[cfg(unix)]
-                    user: Some(format!("{}", nix::unistd::getuid())),
-                    ..BollardContainerConfig::default()
-                },
-            )
-            .await
-            .context("Failed to build container")?;
-
-        // For debugging purposes, try and find out when/why the container stops.
-        let mut wait = docker.wait_container(
-            container_name,
-            Some(WaitContainerOptions {
-                condition: "not-running",
-            }),
+    // Generate configuration to open and map ports.
+    let mut host_port_bindings = HashMap::new();
+    let mut exposed_ports = HashMap::new();
+    for mapping in config.docker.port_mapping.iter().chain(
+        [PortMapping {
+            host: config.homeserver.host_port,
+            guest: HARDCODED_GUEST_PORT,
+        }]
+        .iter(),
+    ) {
+        let key = format!("{}/tcp", mapping.guest);
+        host_port_bindings.insert(
+            key.clone(),
+            Some(vec![PortBinding {
+                host_port: Some(format!("{}", mapping.host)),
+                ..PortBinding::default()
+            }]),
         );
-        {
-            let container_name = container_name.to_string();
-            tokio::task::spawn(async move {
-                debug!(target: "mx-tester-wait", "{} Container started", container_name);
-                while let Some(next) = wait.next().await {
-                    let response = next.context("Error while waiting for container to stop")?;
-                    debug!(target: "mx-tester-wait", "{} {:#?}", container_name, response);
-                }
-                debug!(target: "mx-tester-wait", "{} Container is now down", container_name);
-                Ok::<(), Error>(())
-            });
-        }
+        exposed_ports.insert(key.clone(), HashMap::new());
+    }
+    debug!("port_bindings: {:#?}", host_port_bindings);
 
-        for warning in response.warnings {
-            warn!(target: "creating-container", "{}", warning);
-        }
+    debug!("Creating container {}", container_name);
+    let response = docker
+        .create_container(
+            Some(CreateContainerOptions {
+                name: container_name,
+            }),
+            BollardContainerConfig {
+                env: Some(env.clone()),
+                exposed_ports: Some(exposed_ports),
+                hostname: Some(config.docker.hostname.clone()),
+                host_config: Some(HostConfig {
+                    log_config: Some(HostConfigLogConfig {
+                        typ: Some("json-file".to_string()),
+                        config: None,
+                    }),
+                    // Synapse has a tendency to not start correctly
+                    // or to stop shortly after startup. The following
+                    // restart policy seems to help a lot.
+                    restart_policy: Some(RestartPolicy {
+                        name: Some(RestartPolicyNameEnum::ON_FAILURE),
+                        maximum_retry_count: Some(MAX_SYNAPSE_RESTART_COUNT),
+                    }),
+                    // Extremely large memory allowance.
+                    memory_reservation: Some(MEMORY_ALLOCATION_BYTES),
+                    memory_swap: Some(-1),
+                    // Mount guest directories as host directories.
+                    binds: Some(vec![
+                        // Synapse logs, etc.
+                        format!("{}:/data:rw", data_dir.as_os_str().to_string_lossy()),
+                        // Everything below this point is for workers.
+                        format!(
+                            "{}:/conf/workers:rw",
+                            config.synapse_workers_dir().to_string_lossy()
+                        ),
+                        format!(
+                            "{}:/etc/nginx/conf.d:rw",
+                            config.etc_dir().join("nginx").to_string_lossy()
+                        ),
+                        format!(
+                            "{}:/etc/supervisor/conf.d:rw",
+                            config.etc_dir().join("supervisor").to_string_lossy()
+                        ),
+                        format!(
+                            "{}:/var/log/nginx:rw",
+                            config.logs_dir().join("nginx").to_string_lossy()
+                        ),
+                    ]),
+                    // Expose guest port `guest_mapping` as `host_mapping`.
+                    port_bindings: Some(host_port_bindings),
+                    // Enable access to host as `host.docker.internal` from the guest.
+                    // On macOS and Windows, this is expected to be transparent but
+                    // on Linux, an option needs to be added.
+                    #[cfg(target_os = "linux")]
+                    extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
+                    ..HostConfig::default()
+                }),
+                image: Some(config.tag()),
+                attach_stderr: Some(true),
+                attach_stdout: Some(true),
+                attach_stdin: Some(false),
+                cmd: Some(cmd.clone()),
+                // Specify that a few directories may be mounted.
+                // The empty hashmap... is an oddity of the Docker Engine API.
+                volumes: Some(
+                    vec![
+                        ("/data".to_string(), HashMap::new()),
+                        ("/conf/workers".to_string(), HashMap::new()),
+                        ("/etc/nginx/conf.d".to_string(), HashMap::new()),
+                        ("/etc/supervisor/conf.d".to_string(), HashMap::new()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                tty: Some(false),
+                #[cfg(unix)]
+                user: Some(format!("{}", nix::unistd::getuid())),
+                ..BollardContainerConfig::default()
+            },
+        )
+        .await
+        .context("Failed to build container")?;
+
+    // For debugging purposes, try and find out when/why the container stops.
+    let mut wait = docker.wait_container(
+        container_name,
+        Some(WaitContainerOptions {
+            condition: "not-running",
+        }),
+    );
+    {
+        let container_name = container_name.to_string();
+        tokio::task::spawn(async move {
+            debug!(target: "mx-tester-wait", "{} Container started", container_name);
+            while let Some(next) = wait.next().await {
+                let response = next.context("Error while waiting for container to stop")?;
+                debug!(target: "mx-tester-wait", "{} {:#?}", container_name, response);
+            }
+            debug!(target: "mx-tester-wait", "{} Container is now down", container_name);
+            Ok::<(), Error>(())
+        });
+    }
+
+    for warning in response.warnings {
+        warn!(target: "creating-container", "{}", warning);
     }
 
     // ... add the container to the network.
