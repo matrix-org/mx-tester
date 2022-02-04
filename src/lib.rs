@@ -195,6 +195,19 @@ impl HomeserverConfig {
     }
 }
 
+/// Configuring workers
+#[derive(Debug, TypedBuilder, Deserialize)]
+pub struct WorkersConfig {
+    #[serde(default)]
+    #[builder(default = false)]
+    pub enabled: bool,
+}
+impl Default for WorkersConfig {
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
+
 /// The contents of a mx-tester.yaml
 #[derive(Debug, TypedBuilder, Deserialize)]
 pub struct Config {
@@ -260,7 +273,7 @@ pub struct Config {
     /// Specify whether workers should be used.
     ///
     /// May be overridden from the command-line.
-    pub enable_workers: bool,
+    pub workers: WorkersConfig,
 
     #[serde(default = "util::true_")]
     #[builder(default = true)]
@@ -327,7 +340,7 @@ impl Config {
             .entry(LISTENERS.into())
             .or_insert_with(|| yaml!([]));
         *listeners = yaml!([yaml!({
-            "port" => if self.enable_workers { HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT } else { HARDCODED_GUEST_PORT },
+            "port" => if self.workers.enabled { HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT } else { HARDCODED_GUEST_PORT },
             "tls" => false,
             "type" => "http",
             "bind_addresses" => yaml!(["::"]),
@@ -353,7 +366,7 @@ impl Config {
             modules_root.push(module.config.clone());
         }
 
-        if self.enable_workers {
+        if self.workers.enabled {
             for (key, value) in std::array::IntoIter::new([
                 // No worker support without redis.
                 (
@@ -495,7 +508,7 @@ impl Config {
                     "mx-tester-synapse-{}-{}{workers}",
                     tag,
                     self.name,
-                    workers = if self.enable_workers { "-workers" } else { "" }
+                    workers = if self.workers.enabled { "-workers" } else { "" }
                 )
             }
         }
@@ -511,7 +524,7 @@ impl Config {
         format!(
             "mx-tester-synapse-setup-{}{}",
             self.name,
-            if self.enable_workers { "-workers" } else { "" }
+            if self.workers.enabled { "-workers" } else { "" }
         )
     }
 
@@ -520,7 +533,7 @@ impl Config {
         format!(
             "mx-tester-synapse-run-{}{}",
             self.name,
-            if self.enable_workers { "-workers" } else { "" }
+            if self.workers.enabled { "-workers" } else { "" }
         )
     }
 }
@@ -696,14 +709,14 @@ async fn start_synapse_container(
         "SYNAPSE_CONFIG_DIR=/data".into(),
         format!(
             "SYNAPSE_HTTP_PORT={}",
-            if config.enable_workers {
+            if config.workers.enabled {
                 HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT
             } else {
                 HARDCODED_GUEST_PORT
             }
         ),
     ];
-    if config.enable_workers {
+    if config.workers.enabled {
         // The list of workers to launch, as copied from Complement.
         // It has two instances of `event_persister` by design, in order
         // to launch two event persisters.
@@ -1012,7 +1025,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     }
 
     // Prepare resource files.
-    if config.enable_workers {
+    if config.workers.enabled {
         let conf_dir = synapse_root.join("conf");
         std::fs::create_dir_all(&conf_dir)
             .context("Could not create directory for worker configuration file")?;
@@ -1101,7 +1114,7 @@ EXPOSE {synapse_http_port}/tcp 8009/tcp 8448/tcp
     uid=nix::unistd::getuid(),
     synapse_http_port = HARDCODED_GUEST_PORT,
     maybe_setup_workers =
-    if config.enable_workers {
+    if config.workers.enabled {
 "
 # Install dependencies
 RUN apt-get update && apt-get install -y postgresql postgresql-client-13 supervisor redis nginx sudo
@@ -1239,7 +1252,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         docker,
         config,
         &setup_container_name,
-        if config.enable_workers {
+        if config.workers.enabled {
             vec!["/workers_start.py".to_string(), "generate".to_string()]
         } else {
             vec!["/start.py".to_string(), "generate".to_string()]
@@ -1279,7 +1292,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         docker,
         config,
         &run_container_name,
-        if config.enable_workers {
+        if config.workers.enabled {
             vec!["/workers_start.py".to_string(), "start".to_string()]
         } else {
             vec!["/start.py".to_string()]

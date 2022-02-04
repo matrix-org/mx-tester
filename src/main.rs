@@ -137,7 +137,7 @@ async fn main() {
         config.directories.root = std::path::Path::new(root).to_path_buf()
     }
     let workers = matches.is_present("workers");
-    config.enable_workers = workers;
+    config.workers.enabled = workers;
     if let Some(synapse_tag) = matches.value_of("synapse-tag") {
         config.synapse = SynapseVersion::Docker {
             tag: format!("matrixdotorg/synapse:{}", synapse_tag),

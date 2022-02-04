@@ -231,7 +231,7 @@ async fn test_workers() {
     let docker = DOCKER.clone();
     let config = Config::builder()
         .name("test-simple-workers".into())
-        .enable_workers(true)
+        .workers(WorkersConfig::builder().enabled(true).build())
         .build()
         .assign_port();
     let _ = Cleanup::new(&config);

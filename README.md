@@ -212,7 +212,8 @@ credentials:
   # May be overridden from the command-line with parameter `--server`.
 
 # Optional
-enable_workers:
+workers:
+  enabled:
   # A boolean. Specify `true` to launch Synapse with workers.
   # Default: No workers.
   # May be overridden from the command-line with parameter `--workers`.
