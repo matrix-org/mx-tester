@@ -156,8 +156,16 @@ async fn main() {
     let docker = if let Some(ref server) = config.credentials.serveraddress {
         // If we have provided a server, well, let's use it.
         // This is mainly useful for running in CI.
-        info!("Using docker repository {}", server);
-        bollard::Docker::connect_with_http_defaults().context("Connecting with http defaults")
+        match std::env::var("DOCKER_CERT_PATH") {
+            Ok(_) => {
+                info!("Using docker repository with TLS {}", server);
+                bollard::Docker::connect_with_http_defaults().context("Connecting with http defaults")
+            }
+            Err(_) => {
+                info!("Using docker repository {}", server);
+                bollard::Docker::connect_with_ssl_defaults().context("Connecting with SSL defaults")
+            }
+        }
     } else {
         // Otherwise, use the local defaults.
         info!("Using local docker repository");
