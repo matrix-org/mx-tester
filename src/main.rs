@@ -211,4 +211,5 @@ async fn main() {
         // We haven't consumed the result of run().
         result.expect("Error in `run`");
     }
+    println!("mx-tester success");
 }

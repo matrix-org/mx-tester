@@ -78,6 +78,11 @@ lazy_static! {
     ///
     /// Passed to `build`, `up`, `run`, `down` scripts.
     static ref MX_TEST_CWD: OsString = OsString::from_str("MX_TEST_CWD").unwrap();
+
+    /// Environment variable: defined if workers are enabled.
+    ///
+    /// Passed to `build`, `up`, `run`, `down` scripts.
+    static ref MX_TEST_WORKERS_ENABLED: OsString = OsString::from_str("MX_TEST_WORKERS_ENABLED").unwrap();
 }
 
 /// The amount of memory to allocate
@@ -303,6 +308,9 @@ impl Config {
         env.insert(&*MX_TEST_SYNAPSE_DIR, synapse_root.as_os_str().into());
         env.insert(&*MX_TEST_SCRIPT_TMPDIR, script_tmpdir.as_os_str().into());
         env.insert(&*MX_TEST_CWD, curdir.as_os_str().into());
+        if self.workers.enabled {
+            env.insert(&*MX_TEST_WORKERS_ENABLED, "true".into());
+        }
         Ok(env)
     }
 
@@ -1055,9 +1063,12 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
             "Calling build script for module {} with MX_TEST_DIR={:#?}",
             &module.name, path
         );
+        let log_dir = modules_log_dir.join(&module.name);
+        std::fs::create_dir_all(&log_dir)
+            .with_context(|| format!("Could not create directory {:#?}", log_dir,))?;
         module
             .build
-            .run("build", &modules_log_dir, &env)
+            .run("build", &log_dir, &env)
             .await
             .context("Error running build script")?;
         debug!("Completed one module.");
