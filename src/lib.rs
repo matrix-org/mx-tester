@@ -106,6 +106,9 @@ const HARDCODED_GUEST_PORT: u64 = 8008;
 /// inside Docker.
 const HARDCODED_MAIN_PROCESS_HTTP_LISTENER_PORT: u64 = 8080;
 
+const TIMEOUT_USER_REGISTRATION_SIMPLE: std::time::Duration = std::time::Duration::new(120, 0);
+const TIMEOUT_USER_REGISTRATION_WORKERS: std::time::Duration = std::time::Duration::new(360, 0);
+
 /// A port in the container made accessible on the host machine.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PortMapping {
@@ -1367,13 +1370,18 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     // above works. If it doesn't, we can still have a case in which Synapse won't start,
     // causing `handle_user_registration` to loop endlessly. The `timeout` should make
     // sure that we fail properly and with an understandable error message.
-    //
-    // This will presumably disappear if the `synapse_is_responsive` manipulation above works.
-    match tokio::time::timeout(std::time::Duration::new(120, 0), async {
-        handle_user_registration(config)
-            .await
-            .context("Failed to setup users")
-    })
+    match tokio::time::timeout(
+        if config.workers.enabled {
+            TIMEOUT_USER_REGISTRATION_WORKERS
+        } else {
+            TIMEOUT_USER_REGISTRATION_SIMPLE
+        },
+        async {
+            handle_user_registration(config)
+                .await
+                .context("Failed to setup users")
+        },
+    )
     .await
     {
         Err(_) => {
