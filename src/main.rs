@@ -159,7 +159,8 @@ async fn main() {
         match std::env::var("DOCKER_CERT_PATH") {
             Ok(_) => {
                 info!("Using docker repository with TLS {}", server);
-                bollard::Docker::connect_with_http_defaults().context("Connecting with http defaults")
+                bollard::Docker::connect_with_http_defaults()
+                    .context("Connecting with http defaults")
             }
             Err(_) => {
                 info!("Using docker repository {}", server);

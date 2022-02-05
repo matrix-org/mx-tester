@@ -394,6 +394,7 @@ def generate_worker_files(environ, config_path: str, data_dir: str):
     else:
         # Split type names by comma
         worker_types = worker_types.split(",")
+    log("Worker types: %s" % worker_types)
 
     # Create the worker configuration directory if it doesn't already exist
     os.makedirs("/conf/workers", exist_ok=True)
@@ -462,7 +463,7 @@ def generate_worker_files(environ, config_path: str, data_dir: str):
         # Check whether we should write worker logs to disk, in addition to the console
         extra_log_template_args = {}
         if environ.get("SYNAPSE_WORKERS_WRITE_LOGS_TO_DISK"):
-            extra_log_template_args["LOG_FILE_PATH"] = "{dir}/logs/{name}.log".format(
+            extra_log_template_args["LOG_FILE_PATH"] = "/var/log/workers/{name}.log".format(
                 dir=data_dir, name=worker_name
             )
 
@@ -568,9 +569,17 @@ def start_supervisord():
         "chmod ugo+rw /etc/supervisor/conf.d",
 
         # FIXME: What uses this?
+        "mkdir -p /var/log/journal",
         "chmod ugo+rw /var/log/journal",
 
+        # Create /var/log/workers, we'll use it to write the logs
+        # for workers once they start.
+        "mkdir -p /var/log/workers",
+        "chmod ugo+rw /var/log/workers",
+
         # Setup and launch postgres
+        # HACK: Moving this to earlier in the list of sudo actions
+        # seems to fail, with postgres apparently not being ready.
         "pg_ctlcluster 13 main start",
         "sudo -u postgres psql -f /conf/postgres.sql"
     ]:
@@ -609,6 +618,7 @@ def main(args, environ):
         if not os.path.exists(config_path):
             log("Generating base homeserver config")
             generate_base_homeserver_config()
+        generate_worker_files(environ, config_path, data_dir)
 
     if should_start:
         # Start supervisord, which will start Synapse, all of the configured worker
