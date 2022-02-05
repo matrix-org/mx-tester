@@ -935,7 +935,7 @@ async fn start_synapse_container(
                 config
                     .logs_dir()
                     .join("docker")
-                    .join(format!("{}.log", if detach { "up" } else { "build" })),
+                    .join(format!("{}.log", if detach { "up-run-down" } else { "build" })),
             )
             .await?;
         tokio::task::spawn(async move {
@@ -993,7 +993,7 @@ async fn start_synapse_container(
                 config
                     .logs_dir()
                     .join("docker")
-                    .join(format!("{}.out", if detach { "up" } else { "build" })),
+                    .join(format!("{}.out", if detach { "up-run-down" } else { "build" })),
             )
             .await?;
         tokio::task::spawn(async move {
@@ -1028,6 +1028,8 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     } = config.synapse;
     let setup_container_name = config.setup_container_name();
     let run_container_name = config.run_container_name();
+
+    println!("mx-tester build starting");
 
     // Remove any trace of a previous build. Ignore failures.
     let _ = docker.stop_container(&run_container_name, None).await;
@@ -1234,6 +1236,8 @@ RUN chmod ugo+rx /workers_start.py && chown mx-tester /workers_start.py
         }
     }
     debug!("Image built");
+
+    println!("mx-tester build success");
     Ok(())
 }
 
@@ -1246,6 +1250,8 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     } else {
         None
     };
+
+    println!("mx-tester up starting");
 
     // Create the network if necessary.
     // We'll add the container once it's available.
@@ -1264,6 +1270,9 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
             "The network should now be up"
         );
     } else {
+        // This can happen for instance if a script needs to
+        // spawn another image on the same network and creates
+        // that network manually.
         debug!("Network {} already exists", network_name);
     }
 
@@ -1397,6 +1406,8 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     }
 
     cleanup.disarm();
+
+    println!("mx-tester up success");
     Ok(())
 }
 
@@ -1405,6 +1416,8 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
     // This will break (on purpose) once we extend `SynapseVersion`.
     let SynapseVersion::Docker { .. } = config.synapse;
     let run_container_name = config.run_container_name();
+
+    println!("mx-tester down starting");
 
     // Store results, we'll report them after we've brought down everything
     // that we can bring down.
@@ -1464,10 +1477,28 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
             Ok(())
         }
         Ok(_) => {
-            debug!(target: "mx-tester-down", "Synapse taken down");
+            debug!(target: "mx-tester-down", "Synapse container stopped");
             Ok(())
         }
         Err(err) => Err(err).context("Error stopping container"),
+    };
+
+    let remove_container_result = match docker.remove_container(&run_container_name, None).await {
+        Err(bollard::errors::Error::DockerResponseNotModifiedError { .. }) => {
+            // Synapse is already down.
+            debug!(target: "mx-tester-down", "Synapse was already down");
+            Ok(())
+        }
+        Err(bollard::errors::Error::DockerResponseNotFoundError { .. }) => {
+            // Synapse is already down.
+            debug!(target: "mx-tester-down", "No Synapse container");
+            Ok(())
+        }
+        Ok(_) => {
+            debug!(target: "mx-tester-down", "Synapse container removed");
+            Ok(())
+        }
+        Err(err) => Err(err).context("Error removing container"),
     };
 
     debug!(target: "mx-tester-down", "Taking down network.");
@@ -1488,20 +1519,25 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
         }
         Err(err) => Err(err).context("Error stopping network"),
     };
+
+    println!("mx-tester down complete");
     // Finally, report any problem.
     script_result
         .and(stop_container_result)
+        .and(remove_container_result)
         .and(remove_network_result)
 }
 
 /// Run the testing script.
 pub async fn run(_docker: &Docker, config: &Config) -> Result<(), Error> {
+    println!("mx-tester run starting");
     if let Some(ref code) = config.run {
         let env = config.shared_env_variables()?;
         code.run("run", &config.scripts_logs_dir(), &env)
             .await
             .context("Error running `run` script")?;
     }
+    println!("mx-tester run success");
     Ok(())
 }
 

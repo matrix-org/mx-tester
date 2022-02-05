@@ -215,10 +215,6 @@ async fn test_repeat() {
         .expect("Failed in step `build`");
     for i in 0..200 {
         info!("test_repeat: iteration {}", i);
-        if i > 0 {
-            // Give Docker time to cleanup.
-            tokio::time::sleep(std::time::Duration::new(5, 0)).await;
-        }
         mx_tester::up(&docker, &config)
             .await
             .expect("Failed in step `up`");
