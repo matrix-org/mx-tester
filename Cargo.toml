@@ -1,7 +1,7 @@
 [package]
 name = "mx-tester"
 description = "A tool to help test Matrix bots and Synapse modules."
-version = "0.3.0-alpha.4"
+version = "0.3.0-alpha.5"
 edition = "2018"
 license = "Apache-2.0"
 repository = "https://github.com/matrix-org/mx-tester"
