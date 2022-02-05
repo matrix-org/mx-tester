@@ -153,6 +153,10 @@ async fn main() {
         return;
     }
 
+    println!(
+        "mx-tester starting. Logs will be stored at {logs_dir}",
+        logs_dir = config.logs_dir()
+    );
     let docker = if let Some(ref server) = config.credentials.serveraddress {
         // If we have provided a server, well, let's use it.
         // This is mainly useful for running in CI.

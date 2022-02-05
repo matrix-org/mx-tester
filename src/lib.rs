@@ -931,12 +931,10 @@ async fn start_synapse_container(
         let mut log_file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(
-                config
-                    .logs_dir()
-                    .join("docker")
-                    .join(format!("{}.log", if detach { "up-run-down" } else { "build" })),
-            )
+            .open(config.logs_dir().join("docker").join(format!(
+                "{}.log",
+                if detach { "up-run-down" } else { "build" }
+            )))
             .await?;
         tokio::task::spawn(async move {
             debug!(target: "mx-tester-log", "Starting log watcher");
@@ -989,12 +987,10 @@ async fn start_synapse_container(
         let mut log_file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(
-                config
-                    .logs_dir()
-                    .join("docker")
-                    .join(format!("{}.out", if detach { "up-run-down" } else { "build" })),
-            )
+            .open(config.logs_dir().join("docker").join(format!(
+                "{}.out",
+                if detach { "up-run-down" } else { "build" }
+            )))
             .await?;
         tokio::task::spawn(async move {
             debug!(target: "synapse", "Launching Synapse container");
