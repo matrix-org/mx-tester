@@ -154,7 +154,7 @@ async fn main() {
     }
 
     println!(
-        "mx-tester starting. Logs will be stored at {logs_dir}",
+        "mx-tester starting. Logs will be stored at {logs_dir:?}",
         logs_dir = config.logs_dir()
     );
     let docker = if let Some(ref server) = config.credentials.serveraddress {
