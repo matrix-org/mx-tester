@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod cleanup;
+pub mod exec;
 pub mod registration;
 mod util;
 
@@ -52,7 +53,10 @@ use typed_builder::TypedBuilder;
 
 use registration::{handle_user_registration, User};
 
-use crate::util::YamlExt;
+use crate::{
+    exec::{CommandExt, Executor},
+    util::YamlExt,
+};
 
 lazy_static! {
     /// Environment variable: the directory where a given module should be copied.
@@ -518,6 +522,10 @@ impl Config {
         self.test_root().join("logs")
     }
 
+    pub fn scripts_logs_dir(&self) -> PathBuf {
+        self.logs_dir().join("mx-tester")
+    }
+
     /// A tag for the Docker image we're creating/using.
     pub fn tag(&self) -> String {
         match self.synapse {
@@ -615,19 +623,25 @@ pub struct Script {
     lines: Vec<String>,
 }
 impl Script {
-    pub fn run(&self, env: &HashMap<&'static OsStr, OsString>) -> Result<(), Error> {
+    pub async fn run(
+        &self,
+        stage: &'static str,
+        log_dir: &PathBuf,
+        env: &HashMap<&'static OsStr, OsString>,
+    ) -> Result<(), Error> {
         debug!("Running with environment variables {:#?}", env);
+        let executor = Executor::try_new().context("Cannot instantiate executor")?;
         for line in &self.lines {
-            let mut exec = ezexec::ExecBuilder::with_shell(line).map_err(|err| {
-                anyhow!("Could not interpret `{}` as shell script: {}", line, err)
-            })?;
+            let mut command = executor
+                .command(line)
+                .with_context(|| format!("Could not interpret `{}` as shell script", line))?;
             for (key, val) in env {
-                exec.set_env(key, val);
+                command.env(key, val);
             }
-            exec.spawn_transparent()
-                .map_err(|err| anyhow!("Error executing `{}`: {}", line, err))?
-                .wait()
-                .map_err(|err| anyhow!("Error during `{}`: {}", line, err))?;
+            command
+                .spawn_logged(log_dir, stage)
+                .await
+                .with_context(|| format!("Error within line {line}"))?;
         }
         Ok(())
     }
@@ -838,7 +852,7 @@ async fn start_synapse_container(
                         ("/conf/workers".to_string(), HashMap::new()),
                         ("/etc/nginx/conf.d".to_string(), HashMap::new()),
                         ("/etc/supervisor/conf.d".to_string(), HashMap::new()),
-                        ("/var/log/workers". to_string(), HashMap::new()),
+                        ("/var/log/workers".to_string(), HashMap::new()),
                     ]
                     .into_iter()
                     .collect(),
@@ -967,10 +981,12 @@ async fn start_synapse_container(
         let mut log_file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(config.logs_dir().join("docker").join(format!(
-                "{}.stdout.log",
-                if detach { "up" } else { "build" }
-            )))
+            .open(
+                config
+                    .logs_dir()
+                    .join("docker")
+                    .join(format!("{}.out", if detach { "up" } else { "build" })),
+            )
             .await?;
         tokio::task::spawn(async move {
             debug!(target: "synapse", "Launching Synapse container");
@@ -1014,6 +1030,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
 
     let synapse_root = config.synapse_root();
     let _ = std::fs::remove_dir_all(config.test_root());
+    let modules_log_dir = config.scripts_logs_dir().join("modules");
     for dir in &[
         &config.synapse_data_dir(),
         &config.synapse_workers_dir(),
@@ -1022,6 +1039,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
         &config.logs_dir().join("docker"),
         &config.logs_dir().join("nginx"),
         &config.logs_dir().join("workers"),
+        &modules_log_dir,
     ] {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Could not create directory {:#?}", dir,))?;
@@ -1029,6 +1047,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
 
     // Build modules
     let mut env = config.shared_env_variables()?;
+
     for module in &config.modules {
         let path = synapse_root.join(&module.name);
         env.insert(&*MX_TEST_MODULE_DIR, path.as_os_str().into());
@@ -1038,7 +1057,8 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
         );
         module
             .build
-            .run(&env)
+            .run("build", &modules_log_dir, &env)
+            .await
             .context("Error running build script")?;
         debug!("Completed one module.");
     }
@@ -1239,6 +1259,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     // Only execute the `up` script once the network is up,
     // in case we want to e.g. bring up images that need
     // that same network.
+    let script_log_dir = config.scripts_logs_dir();
     match config.up {
         Some(UpScript::FullUpScript(FullUpScript {
             before: Some(ref script),
@@ -1247,7 +1268,8 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         | Some(UpScript::SimpleScript(ref script)) => {
             let env = config.shared_env_variables()?;
             script
-                .run(&env)
+                .run("up", &script_log_dir, &env)
+                .await
                 .context("Error running `up` script (before)")?;
         }
         _ => {}
@@ -1358,7 +1380,8 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     {
         let env = config.shared_env_variables()?;
         script
-            .run(&env)
+            .run("up", &script_log_dir, &env)
+            .await
             .context("Error running `up` script (after)")?;
     }
 
@@ -1374,6 +1397,7 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
 
     // Store results, we'll report them after we've brought down everything
     // that we can bring down.
+    let script_log_dir = config.scripts_logs_dir();
     let script_result = if let Some(ref down_script) = config.down {
         let env = config.shared_env_variables()?;
         // First run on_failure/on_success.
@@ -1386,7 +1410,8 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
                     ..
                 },
             ) => on_failure
-                .run(&env)
+                .run("on_failure", &script_log_dir, &env)
+                .await
                 .context("Error while running script `down/failure`"),
             (
                 Status::Success,
@@ -1395,7 +1420,8 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
                     ..
                 },
             ) => on_success
-                .run(&env)
+                .run("on_success", &script_log_dir, &env)
+                .await
                 .context("Error while running script `down/success`"),
             _ => Ok(()),
         };
@@ -1403,7 +1429,8 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
         if let Some(ref on_always) = down_script.finally {
             result.and(
                 on_always
-                    .run(&env)
+                    .run("on_always", &script_log_dir, &env)
+                    .await
                     .context("Error while running script `down/finally`"),
             )
         } else {
@@ -1457,10 +1484,12 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
 }
 
 /// Run the testing script.
-pub fn run(_docker: &Docker, config: &Config) -> Result<(), Error> {
+pub async fn run(_docker: &Docker, config: &Config) -> Result<(), Error> {
     if let Some(ref code) = config.run {
         let env = config.shared_env_variables()?;
-        code.run(&env).context("Error running `run` script")?;
+        code.run("run", &config.scripts_logs_dir(), &env)
+            .await
+            .context("Error running `run` script")?;
     }
     Ok(())
 }
