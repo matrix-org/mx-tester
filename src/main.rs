@@ -177,13 +177,22 @@ async fn main() {
             panic!("Option conflict: `--docker-ssl=always` requires option `--server` or an server address in mx-tester.yml")
         }
         // Server configured.
-        ("never", &Some(ref server)) | ("detect", &Some(ref server)) if !has_docker_ssl_config => {
+        ("never", &Some(ref server)) => {
             info!("Using docker repository with HTTP {}", server);
             bollard::Docker::connect_with_http_defaults().context("Connecting with HTTP")            
         },
-        ("always", &Some(ref server)) | ("detect", &Some(ref server)) if has_docker_ssl_config => {
+        ("always", &Some(ref server)) => {
             info!("Using docker repository with SSL {}", server);
             bollard::Docker::connect_with_ssl_defaults().context("Connecting with SSL")
+        }
+        ("detect", &Some(ref server)) => {
+            if has_docker_ssl_config {
+                info!("Autodected: using docker repository with SSL {}", server);
+                bollard::Docker::connect_with_ssl_defaults().context("Connecting with SSL")    
+            } else {
+                info!("Autodetected: using docker repository with HTTP {}", server);
+                bollard::Docker::connect_with_http_defaults().context("Connecting with HTTP")                
+            }
         }
         other => {
             panic!("Invalid option for docker-ssl: {:?}", other)
