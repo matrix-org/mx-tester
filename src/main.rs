@@ -153,6 +153,18 @@ async fn main() {
         };
     }
 
+    enum ShouldSsl {
+        Never,
+        Detect,
+        Always
+    }
+    let should_ssl = match matches.value_of("docker-ssl").unwrap() {
+        "never" => ShouldSsl::Never,
+        "detect" => ShouldSsl::Detect,
+        "always" => ShouldSsl::Always,
+        _ => panic!() // This should be caught by Clap
+    };
+
     // Now run the scripts.
     // We stop immediately if `build` or `up` fails but if `run` fails,
     // we may need to run some cleanup before stopping.
@@ -166,36 +178,24 @@ async fn main() {
         "mx-tester starting. Logs will be stored at {logs_dir:?}",
         logs_dir = config.logs_dir()
     );
-    let has_docker_ssl_config = std::env::var("DOCKER_CERT_PATH").is_ok();
-    let docker = match (matches.value_of("docker-ssl").unwrap(), &config.credentials.serveraddress) {
-        // No server configured.
-        ("never", None) | ("detect", None) => {
+    let has_docker_cert_path = std::env::var("DOCKER_CERT_PATH").is_ok();
+    let docker = match (should_ssl, &config.credentials.serveraddress, has_docker_cert_path) {
+        // No server configured => we can only run locally.
+        (ShouldSsl::Never, None, _) | (ShouldSsl::Detect, None, _) => {
             info!("Using local docker repository");
             bollard::Docker::connect_with_local_defaults().context("Connecting with local defaults")    
         }
-        ("always", None) => {
+        (ShouldSsl::Always, None, _) => {
             panic!("Option conflict: `--docker-ssl=always` requires option `--server` or an server address in mx-tester.yml")
         }
-        // Server configured.
-        ("never", &Some(ref server)) => {
+        // Server configured => we can run either with HTTP or SSL.
+        (ShouldSsl::Never, &Some(ref server), _) | (ShouldSsl::Detect, &Some(ref server), false) => {
             info!("Using docker repository with HTTP {}", server);
             bollard::Docker::connect_with_http_defaults().context("Connecting with HTTP")            
         },
-        ("always", &Some(ref server)) => {
+        (ShouldSsl::Always, &Some(ref server), _) | (ShouldSsl::Detect, &Some(ref server), true) => {
             info!("Using docker repository with SSL {}", server);
             bollard::Docker::connect_with_ssl_defaults().context("Connecting with SSL")
-        }
-        ("detect", &Some(ref server)) => {
-            if has_docker_ssl_config {
-                info!("Autodected: using docker repository with SSL {}", server);
-                bollard::Docker::connect_with_ssl_defaults().context("Connecting with SSL")    
-            } else {
-                info!("Autodetected: using docker repository with HTTP {}", server);
-                bollard::Docker::connect_with_http_defaults().context("Connecting with HTTP")                
-            }
-        }
-        other => {
-            panic!("Invalid option for docker-ssl: {:?}", other)
         }
     }.expect("Failed to connect to the Docker daemon");
 
