@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
+
 use anyhow::Context;
 use log::*;
 use mx_tester::*;
@@ -97,6 +99,13 @@ async fn main() {
                 .takes_value(false)
                 .help("If specified, do NOT clean up containers in case of error")
         )
+        .arg(
+            Arg::new("docker-ssl")
+                .long("docker-ssl")
+                .default_value("detect")
+                .possible_values(&["always", "never", "detect"])
+                .help("If `detect`, attempt to auto-detect a SSL configuration and fallback tp HTTP otherwise. This may be broken in your CI. If `always`, fail if there is no Docker SSL configuration. If `never`, ignore any Docker SSL configuration.")
+        )
         .get_matches();
 
     let config_path = matches
@@ -157,25 +166,39 @@ async fn main() {
         "mx-tester starting. Logs will be stored at {logs_dir:?}",
         logs_dir = config.logs_dir()
     );
-    let docker = if let Some(ref server) = config.credentials.serveraddress {
-        // If we have provided a server, well, let's use it.
-        // This is mainly useful for running in CI.
-        match std::env::var("DOCKER_CERT_PATH") {
-            Ok(_) => {
-                info!("Using docker repository with TLS {}", server);
-                bollard::Docker::connect_with_ssl_defaults().context("Connecting with SSL")
-            }
-            Err(_) => {
-                info!("Using docker repository with HTTP {}", server);
-                bollard::Docker::connect_with_http_defaults().context("Connecting with HTTP")
-            }
+    let has_docker_ssl_config = std::env::var("DOCKER_CERT_PATH").is_ok();
+    let docker = match (matches.value_of("docker-ssl").unwrap(), &config.credentials.serveraddress) {
+        // No server configured.
+        ("never", None) | ("detect", None) => {
+            info!("Using local docker repository");
+            bollard::Docker::connect_with_local_defaults().context("Connecting with local defaults")    
         }
-    } else {
-        // Otherwise, use the local defaults.
-        info!("Using local docker repository");
-        bollard::Docker::connect_with_local_defaults().context("Connecting with local defaults")
-    }
-    .expect("Failed to connect to the Docker daemon");
+        ("always", None) => {
+            panic!("Option conflict: `--docker-ssl=always` requires option `--server` or an server address in mx-tester.yml")
+        }
+        // Server configured.
+        ("never", &Some(ref server)) | ("detect", &Some(ref server)) if !has_docker_ssl_config => {
+            info!("Using docker repository with HTTP {}", server);
+            bollard::Docker::connect_with_http_defaults().context("Connecting with HTTP")            
+        },
+        ("always", &Some(ref server)) | ("detect", &Some(ref server)) if has_docker_ssl_config => {
+            info!("Using docker repository with SSL {}", server);
+            bollard::Docker::connect_with_ssl_defaults().context("Connecting with SSL")
+        }
+        other => {
+            panic!("Invalid option for docker-ssl: {:?}", other)
+        }
+    }.expect("Failed to connect to the Docker daemon");
+
+    // Test that we can connect to Docker.
+    let version = docker
+        .version()
+        .await
+        .expect("Checking connection to docker daemon");
+    println!(
+        "Using docker {}",
+        version.version.map(Cow::from).unwrap_or_else(|| "?".into())
+    );
 
     // Store the results of a `run` command in case it's followed by
     // a `down` command, which needs to decide between a success path
@@ -215,5 +238,5 @@ async fn main() {
         // We haven't consumed the result of run().
         result.expect("Error in `run`");
     }
-    println!("mx-tester success");
+    println!("* mx-tester success");
 }

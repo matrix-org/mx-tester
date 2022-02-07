@@ -21,6 +21,7 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     ffi::{OsStr, OsString},
+    io::Write,
     ops::Not,
     path::PathBuf,
     str::FromStr,
@@ -307,13 +308,26 @@ impl Config {
         std::fs::create_dir_all(&script_tmpdir)
             .with_context(|| format!("Could not create directory {:#?}", script_tmpdir,))?;
         let curdir = std::env::current_dir()?;
-        let mut env: HashMap<&'static OsStr, _> = HashMap::new();
-        env.insert(&*MX_TEST_SYNAPSE_DIR, synapse_root.as_os_str().into());
-        env.insert(&*MX_TEST_SCRIPT_TMPDIR, script_tmpdir.as_os_str().into());
-        env.insert(&*MX_TEST_CWD, curdir.as_os_str().into());
-        if self.workers.enabled {
-            env.insert(&*MX_TEST_WORKERS_ENABLED, "true".into());
-        }
+        let env: HashMap<&'static OsStr, OsString> = std::array::IntoIter::new([
+            (
+                MX_TEST_SYNAPSE_DIR.as_os_str(),
+                synapse_root.as_os_str().into(),
+            ),
+            (
+                MX_TEST_SCRIPT_TMPDIR.as_os_str(),
+                script_tmpdir.as_os_str().into(),
+            ),
+            (MX_TEST_CWD.as_os_str(), curdir.as_os_str().into()),
+        ])
+        .chain(
+            if self.workers.enabled {
+                Some((MX_TEST_WORKERS_ENABLED.as_os_str(), "true".into()))
+            } else {
+                None
+            }
+            .into_iter(),
+        )
+        .collect();
         Ok(env)
     }
 
@@ -641,6 +655,11 @@ impl Script {
         env: &HashMap<&'static OsStr, OsString>,
     ) -> Result<(), Error> {
         debug!("Running with environment variables {:#?}", env);
+        println!(
+            "** running {} script. Logs will be stored at {:?}",
+            stage,
+            log_dir.join(stage).with_extension("log")
+        );
         let executor = Executor::try_new().context("Cannot instantiate executor")?;
         for line in &self.lines {
             let mut command = executor
@@ -654,6 +673,7 @@ impl Script {
                 .await
                 .with_context(|| format!("Error within line {line}"))?;
         }
+        println!("** running {} script success", stage);
         Ok(())
     }
 }
@@ -1028,7 +1048,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     let setup_container_name = config.setup_container_name();
     let run_container_name = config.run_container_name();
 
-    println!("mx-tester build starting");
+    println!("\n* build step: starting");
 
     // Remove any trace of a previous build. Ignore failures.
     let _ = docker.stop_container(&run_container_name, None).await;
@@ -1055,6 +1075,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     }
 
     // Build modules
+    println!("** building modules");
     let mut env = config.shared_env_variables()?;
 
     for module in &config.modules {
@@ -1074,6 +1095,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
             .context("Error running build script")?;
         debug!("Completed one module.");
     }
+    println!("** building modules success");
 
     // Prepare resource files.
     if config.workers.enabled {
@@ -1208,8 +1230,15 @@ RUN chmod ugo+rx /workers_start.py && chown mx-tester /workers_start.py
         let stream = FramedRead::new(tar_file, BytesCodec::new());
         hyper::Body::wrap_stream(stream)
     };
+    let logs_path = config.logs_dir().join("docker").join("build.log");
+    println!(
+        "** building Docker image. Logs will be stored at {:?}",
+        logs_path
+    );
     debug!("Building image with tag {}", config.tag());
     {
+        let mut log =
+            std::fs::File::create(logs_path).context("Could not create docker build logs")?;
         let mut stream = docker.build_image(
             bollard::image::BuildImageOptions {
                 pull: true,
@@ -1231,12 +1260,17 @@ RUN chmod ugo+rx /workers_start.py && chown mx-tester /workers_start.py
             if let Some(ref error) = info.error {
                 return Err(anyhow!("Error while building an image: {}", error,));
             }
-            debug!("Build image progress {:#?}", info);
+            if let Some(ref progress) = info.progress {
+                debug!("Build image progress {:#?}", info);
+                log.write_all(progress.as_bytes())
+                    .context("Could not write docker build logs")?;
+            }
         }
     }
     debug!("Image built");
+    println!("** building Docker image success");
 
-    println!("mx-tester build success");
+    println!("* build step: success");
     Ok(())
 }
 
@@ -1250,7 +1284,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         None
     };
 
-    println!("mx-tester up starting");
+    println!("\n* up step: starting");
 
     // Create the network if necessary.
     // We'll add the container once it's available.
@@ -1348,6 +1382,10 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         tokio::time::sleep(std::time::Duration::new(5, 0)).await;
     }
 
+    println!(
+        "** starting Synapse. Logs will be stored at {:?}",
+        config.logs_dir().join("docker").join("up-run-down.log")
+    );
     start_synapse_container(
         docker,
         config,
@@ -1387,12 +1425,12 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
         Err(_) => {
             // Timeout.
             panic!(
-                "User registration is taking too long. {}",
-                if docker.is_container_running(&run_container_name).await? {
-                    "Container is running."
+                "User registration is taking too long. {is_running}",
+                is_running = if docker.is_container_running(&run_container_name).await? {
+                    "Container is running, so this is usually an error in Synapse or modules."
                 } else {
-                    "For some reason, Synapse has stopped. Please check the Synapse logs and/or rerun `mx-tester up`."
-                }
+                    "For some reason, the Docker image has stopped."
+                },
             );
         }
         Ok(result) => result,
@@ -1411,7 +1449,7 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
 
     cleanup.disarm();
 
-    println!("mx-tester up success");
+    println!("* up step: success");
     Ok(())
 }
 
@@ -1421,7 +1459,7 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
     let SynapseVersion::Docker { .. } = config.synapse;
     let run_container_name = config.run_container_name();
 
-    println!("mx-tester down starting");
+    println!("\n* down step: starting");
 
     // Store results, we'll report them after we've brought down everything
     // that we can bring down.
@@ -1524,7 +1562,7 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
         Err(err) => Err(err).context("Error stopping network"),
     };
 
-    println!("mx-tester down complete");
+    println!("* down step: complete");
     // Finally, report any problem.
     script_result
         .and(stop_container_result)
@@ -1534,14 +1572,14 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
 
 /// Run the testing script.
 pub async fn run(_docker: &Docker, config: &Config) -> Result<(), Error> {
-    println!("mx-tester run starting");
+    println!("\n* run step: starting");
     if let Some(ref code) = config.run {
         let env = config.shared_env_variables()?;
         code.run("run", &config.scripts_logs_dir(), &env)
             .await
             .context("Error running `run` script")?;
     }
-    println!("mx-tester run success");
+    println!("* run step: success");
     Ok(())
 }
 

@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "mx-tester"
-version = "0.3.0-alpha.5"
+version = "0.3.0-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
