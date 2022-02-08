@@ -156,13 +156,13 @@ async fn main() {
     enum ShouldSsl {
         Never,
         Detect,
-        Always
+        Always,
     }
     let should_ssl = match matches.value_of("docker-ssl").unwrap() {
         "never" => ShouldSsl::Never,
         "detect" => ShouldSsl::Detect,
         "always" => ShouldSsl::Always,
-        _ => panic!() // This should be caught by Clap
+        _ => panic!(), // This should be caught by Clap
     };
 
     // Now run the scripts.
