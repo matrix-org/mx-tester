@@ -117,7 +117,9 @@ async fn main() {
     let mut config: Config = serde_yaml::from_reader(config_file)
         .unwrap_or_else(|err| panic!("Invalid config file `{}`: {}", config_path, err));
     debug!("Config: {:2?}", config);
-
+    for (key, value) in std::env::vars().filter(|(key, _)| key.starts_with("DOCKER_")) {
+        debug!("{}={}", key, value);
+    }
     let commands = match matches.values_of("command") {
         None => vec![Command::Up, Command::Run, Command::Down],
         Some(values) => values
