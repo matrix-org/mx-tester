@@ -1,8 +1,13 @@
+//! A number of simple tests (i.e. modules are not tested) on mx-tester.
+//!
+//! Each test needs to use #[tokio::test(flavor = "multi_thread")], as this
+//! is needed for auto-cleanup in case of failure.
+
 use std::ops::Not;
 
 use lazy_static::lazy_static;
 use log::{debug, info};
-use mx_tester::{self, registration::User, *};
+use mx_tester::{self, cleanup::Cleanup, registration::User, *};
 
 lazy_static! {
     static ref DOCKER: bollard::Docker =
@@ -30,15 +35,13 @@ impl AssignPort for Config {
             }
             debug!("Port {} already occupied, looking for another", port);
         };
-        self.docker.port_mapping.get_mut(0).unwrap().host = port;
-        self.homeserver.server_name = format!("localhost:{}", port);
-        self.homeserver.public_baseurl = format!("http://localhost:{}", port);
+        self.homeserver.set_host_port(port);
         self
     }
 }
 
 /// Simple test: empty config.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_simple() {
     let _ = env_logger::builder().is_test(true).try_init();
     let docker = DOCKER.clone();
@@ -49,6 +52,7 @@ async fn test_simple() {
         })
         .build()
         .assign_port();
+    let _ = Cleanup::new(&config);
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
@@ -60,7 +64,8 @@ async fn test_simple() {
         .expect("Failed in step `down`");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+
 async fn test_create_users() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -82,9 +87,6 @@ async fn test_create_users() {
 
     let config = Config::builder()
         .name("test-create-users".into())
-        .synapse(SynapseVersion::Docker {
-            tag: SYNAPSE_VERSION.into(),
-        })
         .users(vec![
             admin.clone(),
             regular_user.clone(),
@@ -92,6 +94,7 @@ async fn test_create_users() {
         ])
         .build()
         .assign_port();
+    let _ = Cleanup::new(&config);
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
@@ -194,7 +197,8 @@ async fn test_create_users() {
 /// Simple test: repeat numerous times up/down, to increase the
 /// chances of hitting one the cases in which Synapse fails
 /// during startup.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+
 async fn test_repeat() {
     let _ = env_logger::builder().is_test(true).try_init();
     let docker = DOCKER.clone();
@@ -205,6 +209,7 @@ async fn test_repeat() {
         })
         .build()
         .assign_port();
+    let _ = Cleanup::new(&config);
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
@@ -217,4 +222,26 @@ async fn test_repeat() {
             .await
             .expect("Failed in step `down`");
     }
+}
+
+/// Simple test: spawn workers, do nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_workers() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let docker = DOCKER.clone();
+    let config = Config::builder()
+        .name("test-simple-workers".into())
+        .workers(WorkersConfig::builder().enabled(true).build())
+        .build()
+        .assign_port();
+    let _ = Cleanup::new(&config);
+    mx_tester::build(&docker, &config)
+        .await
+        .expect("Failed in step `build`");
+    mx_tester::up(&docker, &config)
+        .await
+        .expect("Failed in step `up`");
+    mx_tester::down(&docker, &config, Status::Manual)
+        .await
+        .expect("Failed in step `down`");
 }
