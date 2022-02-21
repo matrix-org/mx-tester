@@ -26,27 +26,26 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
-    use clap::*;
     env_logger::init();
-    let matches = App::new("mx-tester")
+    let matches = clap::Command::new("mx-tester")
         .version(std::env!("CARGO_PKG_VERSION"))
         .about("Command-line tool to simplify testing Matrix bots and Synapse modules")
         .arg(
-            Arg::new("config")
+            clap::Arg::new("config")
                 .short('c')
                 .long("config")
                 .default_value("mx-tester.yml")
                 .help("The file containing the test configuration."),
         )
         .arg(
-            Arg::new("command")
+            clap::Arg::new("command")
                 .multiple_occurrences(true)
                 .takes_value(false)
                 .possible_values(&["up", "run", "down", "build"])
                 .help("The list of commands to run. Order matters and the same command may be repeated."),
         )
         .arg(
-            Arg::new("username")
+            clap::Arg::new("username")
                 .short('u')
                 .long("username")
                 .takes_value(true)
@@ -54,7 +53,7 @@ async fn main() {
                 .help("A username for logging to the Docker registry")
         )
         .arg(
-            Arg::new("password")
+            clap::Arg::new("password")
                 .short('p')
                 .long("password")
                 .takes_value(true)
@@ -62,14 +61,14 @@ async fn main() {
                 .help("A password for logging to the Docker registry")
         )
         .arg(
-            Arg::new("server")
+            clap::Arg::new("server")
                 .long("server")
                 .takes_value(true)
                 .required(false)
                 .help("A server name for the Docker registry")
         )
         .arg(
-            Arg::new("root_dir")
+            clap::Arg::new("root_dir")
                 .long("root")
                 .takes_value(true)
                 .required(false)
