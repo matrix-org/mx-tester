@@ -728,6 +728,10 @@ pub struct ModuleConfig {
     #[serde(default)]
     install: Option<Script>,
 
+    /// Additional environment information to use in the **guest**.
+    #[serde(default)]
+    env: HashMap<String, String>,
+
     /// A Yaml config to copy into homeserver.yaml.
     /// See https://matrix-org.github.io/synapse/latest/modules/index.html
     ///
@@ -1205,20 +1209,30 @@ RUN pip show matrix-synapse
 # Copy and install custom modules.
 RUN mkdir /mx-tester
 {setup}
-{copy}
+{env}
+{copy_and_install}
 
 ENTRYPOINT []
 
 EXPOSE {synapse_http_port}/tcp 8009/tcp 8448/tcp
 ",
     docker_tag = docker_tag,
+    // Module setup steps, as per `config.modules[_].install`.
     setup = config.modules.iter()
         .filter_map(|module| module.install.as_ref().map(|script| format!("## Setup {}\n{}\n", module.name, script.lines.iter().map(|line| format!("RUN {}", line)).format("\n"))))
         .format("\n"),
-    copy = config.modules.iter()
+    // Module env changes, as per `config.modules[_].env`
+    env = config.modules.iter()
+        .map(|module| module.env.iter()
+            .map(|(key, value)| format!("ENV {}={}\n", key, value))
+            .format("")
+        ).format(""),
+    // Modules copy and `pip` install.
+    copy_and_install = config.modules.iter()
         // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
         .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
         .format("\n"),
+    // Configure user id.
     maybe_uid = {
         let my_uid = nix::unistd::getuid();
         if my_uid != nix::unistd::ROOT {
@@ -1273,8 +1287,12 @@ RUN chmod ugo+rx /workers_start.py && chown mx-tester /workers_start.py
             let tar_file = std::fs::File::create(&tar_path)?;
             let mut tar_builder = tar::Builder::new(std::io::BufWriter::new(tar_file));
             debug!("tar: adding directory {:#?}", synapse_root);
-            tar_builder.append_dir_all("", &synapse_root)?;
-            tar_builder.finish()?;
+            tar_builder
+                .append_dir_all("", &synapse_root)
+                .with_context(|| format!("Error while creating tar for {:#?}", &synapse_root))?;
+            tar_builder
+                .finish()
+                .with_context(|| format!("Error finalizing tar for {:#?}", &synapse_root))?
         }
 
         let tar_file = tokio::fs::File::open(&tar_path).await?;
