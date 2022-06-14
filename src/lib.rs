@@ -732,6 +732,12 @@ pub struct ModuleConfig {
     #[serde(default)]
     env: HashMap<String, String>,
 
+    /// Additional resources to copy from the **host** into the **guest**.
+    /// Key: Guest path, relative to the module's directory.
+    /// Value: Guest path, relative to the project directory.
+    #[serde(default)]
+    copy: HashMap<String, String>,
+
     /// A Yaml config to copy into homeserver.yaml.
     /// See https://matrix-org.github.io/synapse/latest/modules/index.html
     ///
@@ -1210,7 +1216,9 @@ RUN pip show matrix-synapse
 RUN mkdir /mx-tester
 {setup}
 {env}
-{copy_and_install}
+{copy_modules}
+{copy_resources}
+{install}
 
 ENTRYPOINT []
 
@@ -1221,16 +1229,30 @@ EXPOSE {synapse_http_port}/tcp 8009/tcp 8448/tcp
     setup = config.modules.iter()
         .filter_map(|module| module.install.as_ref().map(|script| format!("## Setup {}\n{}\n", module.name, script.lines.iter().map(|line| format!("RUN {}", line)).format("\n"))))
         .format("\n"),
-    // Module env changes, as per `config.modules[_].env`
+    // Module env changes, as per `config.modules[_].env`.
     env = config.modules.iter()
         .map(|module| module.env.iter()
             .map(|(key, value)| format!("ENV {}={}\n", key, value))
             .format("")
         ).format(""),
-    // Modules copy and `pip` install.
-    copy_and_install = config.modules.iter()
+    copy_modules = config.modules.iter()
         // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
-        .map(|module| format!("COPY {module} /mx-tester/{module}\nRUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
+        .map(|module| format!("COPY {module} /mx-tester/{module}", module=module.name))
+        .format("\n"),
+    // Modules additional resources, as per `config.modules[_].copy`.
+    copy_resources = config.modules.iter()
+        .map(|module| module.copy.iter()
+            .map(move |(dest, source)| format!("COPY {source} /mx-tester/{module}/{dest}\n",
+                dest = dest,
+                source = source,
+                module = module.name,
+            ))
+            .format("")
+        ).format(""),
+    // Modules copy and `pip` install.
+    install = config.modules.iter()
+        // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
+        .map(|module| format!("RUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
         .format("\n"),
     // Configure user id.
     maybe_uid = {
