@@ -701,7 +701,7 @@ impl Script {
             command
                 .spawn_logged(log_dir, stage, line)
                 .await
-                .with_context(|| format!("Error within line {line}"))?;
+                .with_context(|| format!("Error within line {line}", line=line))?;
         }
         println!("** running {} script success", stage);
         Ok(())
