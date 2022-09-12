@@ -261,3 +261,18 @@ The guest container is running on a network called `mx-tester-synapse-$(TAG)`,
 where `TAG` is the Docker tag for the version of Synapse running. By default,
 that's `matrixdotorg/synapse:latest`.
 
+# Synapse notes
+
+## Rate limits
+
+Since version 0.3.3, by default, mx-tester expands considerably the rate limits for Synapse. We assume that
+this is the preferred behavior for many tests.
+
+If you do NOT wish to expand the rate limits, you need to override them in the `homeserver` section of `mx-tester.yml`,
+e.g.
+
+```yaml
+homeserver:
+  # ...
+  rc_login: synapse-default # Restores the Synapse default
+```

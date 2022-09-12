@@ -31,7 +31,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
-    use clap::{Arg};
+    use clap::Arg;
     env_logger::init();
     let matches = command!()
         .version(std::env!("CARGO_PKG_VERSION"))
