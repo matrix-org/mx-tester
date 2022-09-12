@@ -199,3 +199,29 @@ impl YamlExt for serde_yaml::Value {
 pub fn true_() -> bool {
     true
 }
+
+pub trait AsRumaError {
+    fn as_ruma_error(&self) -> Option<&matrix_sdk::ruma::api::client::Error>;
+}
+impl AsRumaError for matrix_sdk::HttpError {
+    fn as_ruma_error(&self) -> Option<&matrix_sdk::ruma::api::client::Error> {
+        match *self {
+            matrix_sdk::HttpError::Api(
+                matrix_sdk::ruma::api::error::FromHttpResponseError::Server(
+                    matrix_sdk::ruma::api::error::ServerError::Known(
+                        matrix_sdk::RumaApiError::ClientApi(ref err),
+                    ),
+                ),
+            ) => Some(err),
+            _ => None,
+        }
+    }
+}
+impl AsRumaError for matrix_sdk::Error {
+    fn as_ruma_error(&self) -> Option<&matrix_sdk::ruma::api::client::Error> {
+        match *self {
+            matrix_sdk::Error::Http(ref err) => err.as_ruma_error(),
+            _ => None,
+        }
+    }
+}
