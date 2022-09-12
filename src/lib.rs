@@ -385,6 +385,50 @@ impl Config {
             "enable_registration_without_verification".into(),
             true.into(),
         );
+        // Setup large default rate limits.
+        for key in &["rc_message", "rc_registration", "rc_admin_redaction"] {
+            if !combined_config.contains_key(key) {
+                let rc = yaml!({
+                    "per_second" => 1_000_000_000,
+                    "burst_count" => 1_000_000_000,
+                });
+                combined_config.insert(key.to_string().into(), rc.into());
+            }
+        }
+        if !combined_config.contains_key("rc_login") {
+            let rc_login = yaml!({
+                "address" => yaml!({
+                    "per_second" => 1_000_000_000,
+                    "burst_count" => 1_000_000_000,
+                }),
+                "account" => yaml!({
+                    "per_second" => 1_000_000_000,
+                    "burst_count" => 1_000_000_000,
+                }),
+                "failed_attempts" => yaml!({
+                    "per_second" => 1_000_000_000,
+                    "burst_count" => 1_000_000_000,
+                }),
+            });
+            combined_config.insert("rc_login".into(), rc_login.into());
+        }
+        if !combined_config.contains_key("rc_invites") {
+            let rc_invites = yaml!({
+                "per_room" => yaml!({
+                    "per_second" => 1_000_000_000,
+                    "burst_count" => 1_000_000_000,
+                }),
+                "per_user" => yaml!({
+                    "per_second" => 1_000_000_000,
+                    "burst_count" => 1_000_000_000,
+                }),
+                "per_sender" => yaml!({
+                    "per_second" => 1_000_000_000,
+                    "burst_count" => 1_000_000_000,
+                }),
+            });
+            combined_config.insert("rc_invites".into(), rc_invites.into());
+        }
 
         // Copy extra fields.
         // Note: This may include `modules` or `listeners`.
