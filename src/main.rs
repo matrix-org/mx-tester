@@ -15,6 +15,7 @@
 use std::borrow::Cow;
 
 use anyhow::Context;
+use clap::command;
 use log::*;
 use mx_tester::*;
 
@@ -30,22 +31,26 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
-    use clap::{Arg, Command as App};
+    use clap::{Arg};
     env_logger::init();
-    let matches = App::new("mx-tester")
+    let matches = command!()
         .version(std::env!("CARGO_PKG_VERSION"))
         .about("Command-line tool to simplify testing Matrix bots and Synapse modules")
         .arg(
             Arg::new("config")
                 .short('c')
                 .long("config")
+                .global(true)
                 .default_value("mx-tester.yml")
                 .help("The file containing the test configuration. Pass `[empty]` to run an empty mx-tester.yml, for self-testing."),
         )
         .arg(
+            // Note: `multiple_ocurences` is deprecated but `ArgAction::Append` doesn't actually replace it.
+            #[allow(deprecated)]
             Arg::new("command")
                 .action(clap::ArgAction::Append)
                 .takes_value(false)
+                .multiple_occurrences(true)
                 .value_parser(["up", "run", "down", "build"])
                 .help("The list of commands to run. Order matters and the same command may be repeated."),
         )
@@ -53,6 +58,7 @@ async fn main() {
             Arg::new("username")
                 .short('u')
                 .long("username")
+                .global(true)
                 .takes_value(true)
                 .required(false)
                 .help("A username for logging to the Docker registry")
@@ -61,6 +67,7 @@ async fn main() {
             Arg::new("password")
                 .short('p')
                 .long("password")
+                .global(true)
                 .takes_value(true)
                 .required(false)
                 .help("A password for logging to the Docker registry")
@@ -68,6 +75,7 @@ async fn main() {
         .arg(
             Arg::new("server")
                 .long("server")
+                .global(true)
                 .takes_value(true)
                 .required(false)
                 .help("A server name for the Docker registry")
@@ -75,6 +83,7 @@ async fn main() {
         .arg(
             Arg::new("root_dir")
                 .long("root")
+                .global(true)
                 .value_name("PATH")
                 .takes_value(true)
                 .required(false)
@@ -83,6 +92,7 @@ async fn main() {
         .arg(
             Arg::new("workers")
                 .long("workers")
+                .global(true)
                 .takes_value(false)
                 .required(false)
                 .help("If specified, use workerized Synapse (default: no workers). If you have run `build` with `--workers`, make sure that `up` and `build` are also run with `--workers`.")
@@ -90,6 +100,7 @@ async fn main() {
         .arg(
             Arg::new("synapse-tag")
                 .long("synapse-tag")
+                .global(true)
                 .value_name("TAG")
                 .takes_value(true)
                 .required(false)
@@ -98,18 +109,19 @@ async fn main() {
         .arg(
             Arg::new("no-autoclean-on-error")
                 .long("no-autoclean-on-error")
+                .global(true)
                 .takes_value(false)
                 .help("If specified, do NOT clean up containers in case of error")
         )
         .arg(
             Arg::new("docker-ssl")
                 .long("docker-ssl")
+                .global(true)
                 .default_value("detect")
                 .value_parser(["always", "never", "detect"])
                 .help("If `detect`, attempt to auto-detect a SSL configuration and fallback tp HTTP otherwise. This may be broken in your CI. If `always`, fail if there is no Docker SSL configuration. If `never`, ignore any Docker SSL configuration.")
         )
-        .get_matches();
-
+         .get_matches();
     let config_path: &String = matches
         .get_one("config")
         .expect("Missing value for `config`");
