@@ -386,48 +386,39 @@ impl Config {
             true.into(),
         );
         // Setup large default rate limits.
-        for key in &["rc_message", "rc_registration", "rc_admin_redaction"] {
+        let large_rate_limit: serde_yaml::Value = yaml!({
+            "per_second" => 1_000_000_000,
+            "burst_count" => 1_000_000_000,
+        });
+        for (key, rate_limit) in &[
+            ("rc_message", large_rate_limit.clone()),
+            ("rc_registration", large_rate_limit.clone()),
+            ("rc_admin_redaction", large_rate_limit.clone()),
+            (
+                "rc_login",
+                yaml!({
+                    "address" => large_rate_limit.clone(),
+                    "account" => large_rate_limit.clone(),
+                    "failed_attempts" => large_rate_limit.clone(),
+                }),
+            ),
+            (
+                "rc_invites",
+                yaml!({
+                    "per_room" => large_rate_limit.clone(),
+                    "per_user" => large_rate_limit.clone(),
+                    "per_sender" => large_rate_limit.clone(),
+                }),
+            ),
+        ] {
             if !combined_config.contains_key(key) {
-                let rc = yaml!({
-                    "per_second" => 1_000_000_000,
-                    "burst_count" => 1_000_000_000,
-                });
-                combined_config.insert(key.to_string().into(), rc.into());
+                // Setup a large default rate limit.
+                combined_config.insert(key.to_string().into(), rate_limit.clone());
+            } else if combined_config[key].is_default() {
+                // ...or the Synapse default rate limit.
+                combined_config.remove(key);
             }
-        }
-        if !combined_config.contains_key("rc_login") {
-            let rc_login = yaml!({
-                "address" => yaml!({
-                    "per_second" => 1_000_000_000,
-                    "burst_count" => 1_000_000_000,
-                }),
-                "account" => yaml!({
-                    "per_second" => 1_000_000_000,
-                    "burst_count" => 1_000_000_000,
-                }),
-                "failed_attempts" => yaml!({
-                    "per_second" => 1_000_000_000,
-                    "burst_count" => 1_000_000_000,
-                }),
-            });
-            combined_config.insert("rc_login".into(), rc_login.into());
-        }
-        if !combined_config.contains_key("rc_invites") {
-            let rc_invites = yaml!({
-                "per_room" => yaml!({
-                    "per_second" => 1_000_000_000,
-                    "burst_count" => 1_000_000_000,
-                }),
-                "per_user" => yaml!({
-                    "per_second" => 1_000_000_000,
-                    "burst_count" => 1_000_000_000,
-                }),
-                "per_sender" => yaml!({
-                    "per_second" => 1_000_000_000,
-                    "burst_count" => 1_000_000_000,
-                }),
-            });
-            combined_config.insert("rc_invites".into(), rc_invites.into());
+            // Otherwise, assume that the author of mx-tester.yaml knows what they're doing.
         }
 
         // Copy extra fields.
@@ -1871,5 +1862,24 @@ impl DockerExt for Docker {
             }
         }
         Ok(())
+    }
+}
+
+/// Utility trait: determine whether a yaml value is a stand-in for "please use the default"
+/// value provided by Synapse.
+trait IsDefault {
+    fn is_default(&self) -> bool;
+}
+impl IsDefault for serde_yaml::Value {
+    fn is_default(&self) -> bool {
+        if self.is_null() {
+            return true;
+        }
+        if let Some(str) = self.as_str() {
+            if str == "synapse-default" {
+                return true;
+            }
+        }
+        false
     }
 }
