@@ -1043,10 +1043,13 @@ async fn start_synapse_container(
         .await
         .context("Error while preparing to Synapse container")?;
     let execution = docker
-        .start_exec(&exec.id, Some(StartExecOptions {
-            detach,
-            ..StartExecOptions::default()
-         }))
+        .start_exec(
+            &exec.id,
+            Some(StartExecOptions {
+                detach,
+                ..StartExecOptions::default()
+            }),
+        )
         .await
         .context("Error starting Synapse container")?;
 

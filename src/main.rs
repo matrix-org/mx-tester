@@ -44,9 +44,9 @@ async fn main() {
         )
         .arg(
             Arg::new("command")
-                .multiple_occurrences(true)
+                .action(clap::ArgAction::Append)
                 .takes_value(false)
-                .possible_values(&["up", "run", "down", "build"])
+                .value_parser(["up", "run", "down", "build"])
                 .help("The list of commands to run. Order matters and the same command may be repeated."),
         )
         .arg(
@@ -105,21 +105,21 @@ async fn main() {
             Arg::new("docker-ssl")
                 .long("docker-ssl")
                 .default_value("detect")
-                .possible_values(&["always", "never", "detect"])
+                .value_parser(["always", "never", "detect"])
                 .help("If `detect`, attempt to auto-detect a SSL configuration and fallback tp HTTP otherwise. This may be broken in your CI. If `always`, fail if there is no Docker SSL configuration. If `never`, ignore any Docker SSL configuration.")
         )
         .get_matches();
 
-    let config_path = matches
-        .value_of("config")
+    let config_path: &String = matches
+        .get_one("config")
         .expect("Missing value for `config`");
     let is_self_test = config_path == CONFIG_PATH_AUTOTEST;
 
-    let commands = match matches.values_of("command") {
+    let commands = match matches.get_many::<String>("command") {
         None if is_self_test => vec![],
         None => vec![Command::Up, Command::Run, Command::Down],
         Some(values) => values
-            .map(|command| match command {
+            .map(|command| match command.as_ref() {
                 "up" => Command::Up,
                 "down" => Command::Down,
                 "run" => Command::Run,
@@ -149,21 +149,21 @@ async fn main() {
     }
     debug!("Root: {:?}", config.test_root());
 
-    if let Some(server) = matches.value_of("server") {
+    if let Some(server) = matches.get_one::<String>("server") {
         config.credentials.serveraddress = Some(server.to_string());
     }
-    if let Some(password) = matches.value_of("password") {
+    if let Some(password) = matches.get_one::<String>("password") {
         config.credentials.password = Some(password.to_string());
     }
-    if let Some(username) = matches.value_of("username") {
+    if let Some(username) = matches.get_one::<String>("username") {
         config.credentials.username = Some(username.to_string());
     }
-    if let Some(root) = matches.value_of("root_dir") {
+    if let Some(root) = matches.get_one::<String>("root_dir") {
         config.directories.root = std::path::Path::new(root).to_path_buf()
     }
-    let workers = matches.is_present("workers");
+    let workers = matches.contains_id("workers");
     config.workers.enabled = workers;
-    if let Some(synapse_tag) = matches.value_of("synapse-tag") {
+    if let Some(synapse_tag) = matches.get_one::<String>("synapse-tag") {
         config.synapse = SynapseVersion::Docker {
             tag: format!("matrixdotorg/synapse:{}", synapse_tag),
         };
@@ -174,7 +174,7 @@ async fn main() {
         Detect,
         Always,
     }
-    let should_ssl = match matches.value_of("docker-ssl").unwrap() {
+    let should_ssl = match matches.get_one::<String>("docker-ssl").unwrap().as_ref() {
         "never" => ShouldSsl::Never,
         "detect" => ShouldSsl::Detect,
         "always" => ShouldSsl::Always,
