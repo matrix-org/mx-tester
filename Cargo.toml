@@ -56,7 +56,7 @@ typed-builder = "0.10"
 nix = "0.25"
 
 # Docker
-bollard = { version = "0.12", features = ["ssl"] }
+bollard = { version = "0.13", features = ["ssl"] }
 hyper = "0.14"
 tar = "0.4"
 
