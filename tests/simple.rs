@@ -119,7 +119,9 @@ async fn test_create_users() {
     // Now attempt to login as our users.
     let homeserver_url = reqwest::Url::parse(&config.homeserver.public_baseurl).unwrap();
 
-    let regular_user_client = matrix_sdk::Client::new(homeserver_url.clone()).unwrap();
+    let regular_user_client = matrix_sdk::Client::new(homeserver_url.clone())
+        .await
+        .unwrap();
     regular_user_client
         .login(&regular_user.localname, &regular_user.password, None, None)
         .await
@@ -136,8 +138,9 @@ async fn test_create_users() {
         regular_user_id
     );
 
-    let regular_user_client_with_custom_password =
-        matrix_sdk::Client::new(homeserver_url.clone()).unwrap();
+    let regular_user_client_with_custom_password = matrix_sdk::Client::new(homeserver_url.clone())
+        .await
+        .unwrap();
     regular_user_client_with_custom_password
         .login(
             &regular_user_with_custom_password.localname,
@@ -161,7 +164,9 @@ async fn test_create_users() {
         regular_user_client_with_custom_password_user_id
     );
 
-    let admin_client = matrix_sdk::Client::new(homeserver_url.clone()).unwrap();
+    let admin_client = matrix_sdk::Client::new(homeserver_url.clone())
+        .await
+        .unwrap();
     admin_client
         .login(&admin.localname, &admin.password, None, None)
         .await
@@ -179,7 +184,7 @@ async fn test_create_users() {
     );
 
     // Now check whether the admin can use the user API and others can't.
-    let request = synapse_admin_api::users::get_details::v2::Request::new(&regular_user_id);
+    let request = synapse_admin_api::users::get_details::v2::Request::new(regular_user_id.as_ref());
     let response = admin_client
         .send(request, None)
         .await
@@ -192,7 +197,8 @@ async fn test_create_users() {
         &regular_user_client,
         &regular_user_client_with_custom_password,
     ] {
-        let request = synapse_admin_api::users::get_details::v2::Request::new(&regular_user_id);
+        let request =
+            synapse_admin_api::users::get_details::v2::Request::new(regular_user_id.as_ref());
         client
             .send(request, None)
             .await

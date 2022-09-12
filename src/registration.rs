@@ -23,20 +23,16 @@ use data_encoding::HEXLOWER;
 use hmac::{Hmac, Mac};
 use log::debug;
 use matrix_sdk::{
-    ruma::{
-        api::{
-            client::{error::ErrorKind, Error as ClientError},
-            error::{FromHttpResponseError, ServerError},
-        },
-        RoomAliasId,
-    },
-    ClientConfig, HttpError,
+    ruma::{api::client::error::ErrorKind, RoomAliasId},
+    HttpError,
 };
 use rand::Rng;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use typed_builder::TypedBuilder;
+
+use crate::util::AsRumaError;
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -271,26 +267,29 @@ async fn ensure_user_exists(
         base_url, user.localname, user.password
     );
     use matrix_sdk::ruma::api::client::error::*;
-    use matrix_sdk::ruma::api::error::*;
     let homeserver_url = reqwest::Url::parse(base_url)?;
-    let config = ClientConfig::new();
-    config
-        .get_request_config()
+    let request_config = matrix_sdk::config::RequestConfig::new()
         .retry_limit(RETRY_ATTEMPTS)
         .retry_timeout(std::time::Duration::new(TIMEOUT_SEC, 0));
-    let client = matrix_sdk::Client::new_with_config(homeserver_url, config)?;
+    let client = matrix_sdk::Client::builder()
+        .request_config(request_config)
+        .homeserver_url(homeserver_url)
+        .build()
+        .await?;
     match client
         .login(&user.localname, &user.password, None, None)
         .await
     {
-        Err(matrix_sdk::Error::Http(matrix_sdk::HttpError::ClientApi(
-            FromHttpResponseError::Http(ServerError::Known(err)),
-        ))) if err.kind == ErrorKind::Forbidden => {
-            debug!("Could not authenticate {}", err);
-            // Proceed with registration.
-        }
         Ok(_) => return Ok(client),
-        Err(err) => return Err(err).context("Error attempting to login"),
+        Err(err) => {
+            match err.as_ruma_error() {
+                Some(err) if err.kind == ErrorKind::Forbidden => {
+                    debug!("Could not authenticate {}", err);
+                    // Proceed with registration.
+                }
+                _ => return Err(err).context("Error attempting to login"),
+            }
+        }
     }
     register_user(base_url, registration_shared_secret, user).await?;
     client
@@ -350,14 +349,14 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
             )
         })?;
         for room in &user.rooms {
-            let mut request = matrix_sdk::ruma::api::client::r0::room::create_room::Request::new();
+            let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
             if room.public {
                 request.preset = Some(
-                    matrix_sdk::ruma::api::client::r0::room::create_room::RoomPreset::PublicChat,
+                    matrix_sdk::ruma::api::client::room::create_room::v3::RoomPreset::PublicChat,
                 );
             } else {
                 request.preset = Some(
-                    matrix_sdk::ruma::api::client::r0::room::create_room::RoomPreset::PrivateChat,
+                    matrix_sdk::ruma::api::client::room::create_room::v3::RoomPreset::PrivateChat,
                 );
             }
             if let Some(ref name) = room.name {
@@ -374,10 +373,10 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
                 // If the alias is already taken, we may need to remove it.
                 let full_alias = format!("#{}:{}", alias, config.homeserver.server_name);
                 debug!("Attempting to register alias {}, this may require unregistering previous instances first.", full_alias);
-                let room_alias_id = RoomAliasId::try_from(full_alias.as_ref())?;
+                let room_alias_id = <&RoomAliasId as TryFrom<&str>>::try_from(full_alias.as_ref())?;
                 match client
                     .send(
-                        matrix_sdk::ruma::api::client::r0::alias::delete_alias::Request::new(
+                        matrix_sdk::ruma::api::client::alias::delete_alias::v3::Request::new(
                             &room_alias_id,
                         ),
                         None,
@@ -388,14 +387,13 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
                     Ok(_) => Ok(()),
                     // Room alias wasn't removed because it didn't exist.
                     Err(HttpError::Server(ref code)) if code.as_u16() == 404 => Ok(()),
-                    Err(HttpError::ClientApi(FromHttpResponseError::Http(ServerError::Known(
-                        ClientError {
-                            kind: ErrorKind::NotFound,
-                            ..
-                        },
-                    )))) => Ok(()),
-                    // Room alias wasn't removed for any other reason.
-                    Err(err) => Err(err),
+                    Err(err) => {
+                        match err.as_ruma_error() {
+                            Some(err) if err.kind == ErrorKind::NotFound => Ok(()),
+                            // Room alias wasn't removed for any other reason.
+                            _ => Err(err),
+                        }
+                    }
                 }
                 .context("Error while attempting to unregister existing alias")?;
             }
@@ -445,7 +443,7 @@ mod override_rate_limits {
             description: "Override rate limits",
             method: POST,
             name: "override_rate_limit",
-            path: "/_synapse/admin/v1/users/:user_id/override_ratelimit",
+            unstable_path: "/_synapse/admin/v1/users/:user_id/override_ratelimit",
             rate_limited: false,
             authentication: AccessToken,
         }
