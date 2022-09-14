@@ -20,6 +20,13 @@ pub struct Cleanup {
 
     /// The container name used during `up` and `run`.
     run_container_name: Arc<str>,
+
+    /// The network to which this container is attached.
+    network_name: Arc<str>,
+
+    /// If `true`, during cleanup, also take down the network.
+    /// `false` by default.
+    cleanup_network: bool,
 }
 impl Cleanup {
     pub fn new(config: &Config) -> Self {
@@ -27,7 +34,18 @@ impl Cleanup {
             is_armed: true,
             setup_container_name: config.setup_container_name().into(),
             run_container_name: config.run_container_name().into(),
+            network_name: config.network().into(),
+            cleanup_network: false,
         }
+    }
+
+    /// Enable or disable network cleanup.
+    ///
+    /// `false` by default.
+    ///
+    /// Note that `disarm()` prevents *all* cleanup, regardless of `cleanup_network()`.
+    pub fn cleanup_network(&mut self, value: bool) {
+        self.cleanup_network = value;
     }
 
     /// Disarm this guard.
@@ -46,6 +64,8 @@ impl Drop for Cleanup {
             .expect("Failed to connect to Docker daemon");
         let setup_container_name = self.setup_container_name.clone();
         let run_container_name = self.run_container_name.clone();
+        let network_name = self.network_name.clone();
+        let cleanup_network = self.cleanup_network;
         tokio::task::block_in_place(move || {
             tokio::runtime::Handle::current().block_on(async move {
                 warn!("Auto-cleanup...");
@@ -53,6 +73,9 @@ impl Drop for Cleanup {
                 let _ = docker.remove_container(&setup_container_name, None).await;
                 let _ = docker.stop_container(&run_container_name, None).await;
                 let _ = docker.remove_container(&run_container_name, None).await;
+                if cleanup_network {
+                    let _ = docker.remove_network(&network_name).await;
+                }
                 warn!("Auto-cleanup... DONE");
             });
         });
