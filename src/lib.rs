@@ -395,6 +395,13 @@ impl Config {
             "enable_registration_without_verification".into(),
             true.into(),
         );
+
+        // Copy extra fields.
+        // Note: This may include `modules` or `listeners`.
+        for (key, value) in &self.homeserver.extra_fields {
+            combined_config.insert(YAML::from(key.clone()), value.clone());
+        }
+
         // Setup large default rate limits.
         let large_rate_limit: serde_yaml::Value = yaml!({
             "per_second" => 1_000_000_000,
@@ -427,14 +434,9 @@ impl Config {
             } else if combined_config[key].is_default() {
                 // ...or the Synapse default rate limit.
                 combined_config.remove(key);
+            } else {
+                // Otherwise, assume that the author of mx-tester.yaml knows what they're doing.
             }
-            // Otherwise, assume that the author of mx-tester.yaml knows what they're doing.
-        }
-
-        // Copy extra fields.
-        // Note: This may include `modules` or `listeners`.
-        for (key, value) in &self.homeserver.extra_fields {
-            combined_config.insert(YAML::from(key.clone()), value.clone());
         }
 
         // Make sure that we listen on the appropriate port.

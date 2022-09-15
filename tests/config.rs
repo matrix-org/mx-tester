@@ -108,12 +108,16 @@ async fn test_synapse_provides_rate_limit() {
             None => format!("test-synapse-default-{}", patch_category),
             Some(sub) => format!("test-synapse-default-{}-{}", patch_category, sub),
         };
-        let config: Config = serde_yaml::from_str::<'_, Config>(&format!("name: '{}'", test_name))
-            .expect("Invalid config file")
-            .assign_port();
+        let mut config: Config =
+            serde_yaml::from_str::<'_, Config>(&format!("name: '{}'", test_name))
+                .expect("Invalid config file")
+                .assign_port();
+        config
+            .homeserver
+            .extra_fields
+            .insert((*patch_category).into(), "synapse-default".into());
 
         let mut content = serde_yaml::Mapping::new();
-        content.insert((*patch_category).into(), "synapse-default".into());
         config
             .patch_homeserver_config_content(&mut content)
             .unwrap();
