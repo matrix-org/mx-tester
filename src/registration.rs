@@ -20,7 +20,7 @@ use std::{
 use anyhow::{anyhow, Context, Error};
 use data_encoding::HEXLOWER;
 use hmac::{Hmac, Mac};
-use log::debug;
+use log::{debug, warn};
 use matrix_sdk::{
     ruma::{api::client::error::ErrorKind, RoomAliasId},
     HttpError,
@@ -301,84 +301,107 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
             )
         })?;
         for room in &user.rooms {
-            let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
-            if room.public {
-                request.preset = Some(
-                    matrix_sdk::ruma::api::client::room::create_room::v3::RoomPreset::PublicChat,
-                );
-            } else {
-                request.preset = Some(
-                    matrix_sdk::ruma::api::client::room::create_room::v3::RoomPreset::PrivateChat,
-                );
-            }
-            if let Some(ref name) = room.name {
-                request.name = Some(TryFrom::<&str>::try_from(name.as_str())?);
-            }
-            if let Some(ref alias) = room.alias {
-                if !aliases.insert(alias) {
-                    return Err(anyhow!(
-                        "Attempting to create more than one room with alias {}",
-                        alias
-                    ));
+            loop {
+                let mut request =
+                    matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+                if room.public {
+                    request.preset = Some(
+                        matrix_sdk::ruma::api::client::room::create_room::v3::RoomPreset::PublicChat,
+                    );
+                } else {
+                    request.preset = Some(
+                        matrix_sdk::ruma::api::client::room::create_room::v3::RoomPreset::PrivateChat,
+                    );
                 }
-                request.room_alias_name = Some(alias.as_ref());
-                // If the alias is already taken, we may need to remove it.
-                let full_alias = format!("#{}:{}", alias, config.homeserver.server_name);
-                debug!("Attempting to register alias {}, this may require unregistering previous instances first.", full_alias);
-                let room_alias_id = <&RoomAliasId as TryFrom<&str>>::try_from(full_alias.as_ref())?;
-                match client
-                    .send(
-                        matrix_sdk::ruma::api::client::alias::delete_alias::v3::Request::new(
-                            &room_alias_id,
-                        ),
-                        None,
-                    )
-                    .await
-                {
-                    // Room alias was successfully removed.
-                    Ok(_) => Ok(()),
-                    // Room alias wasn't removed because it didn't exist.
-                    Err(HttpError::Server(ref code)) if code.as_u16() == 404 => Ok(()),
-                    Err(err) => {
-                        match err.as_ruma_error() {
-                            Some(err) if err.kind == ErrorKind::NotFound => Ok(()),
-                            // Room alias wasn't removed for any other reason.
-                            _ => Err(err),
+                if let Some(ref name) = room.name {
+                    request.name = Some(TryFrom::<&str>::try_from(name.as_str())?);
+                }
+                if let Some(ref alias) = room.alias {
+                    if !aliases.insert(alias) {
+                        return Err(anyhow!(
+                            "Attempting to create more than one room with alias {}",
+                            alias
+                        ));
+                    }
+                    request.room_alias_name = Some(alias.as_ref());
+                    // If the alias is already taken, we may need to remove it.
+                    let full_alias = format!("#{}:{}", alias, config.homeserver.server_name);
+                    debug!("Attempting to register alias {}, this may require unregistering previous instances first.", full_alias);
+                    let room_alias_id =
+                        <&RoomAliasId as TryFrom<&str>>::try_from(full_alias.as_ref())?;
+                    match client
+                        .send(
+                            matrix_sdk::ruma::api::client::alias::delete_alias::v3::Request::new(
+                                &room_alias_id,
+                            ),
+                            None,
+                        )
+                        .await
+                    {
+                        // Room alias was successfully removed.
+                        Ok(_) => {
+                            debug!("We have successfully removed a previous instance of the same room alias");
+                            Ok(())
+                        },
+                        // Room alias wasn't removed because it didn't exist.
+                        Err(HttpError::Server(ref code)) if code.as_u16() == 404 => {
+                            debug!("This room alias didn't exist {:?}", code);
+                            Ok(())
+                        }
+                        Err(err) => {
+                            match err.as_ruma_error() {
+                                Some(err) if err.kind == ErrorKind::NotFound => {
+                                    debug!("This room alias didn't exist {:?}", err);
+                                    Ok(())
+                                }
+                                // Room alias wasn't removed for any other reason.
+                                _ => Err(err),
+                            }
                         }
                     }
+                    .context("Error while attempting to unregister existing alias")?;
                 }
-                .context("Error while attempting to unregister existing alias")?;
-            }
-            if let Some(ref topic) = room.topic {
-                request.topic = Some(topic.as_ref());
-            }
-
-            // Place invites.
-            let mut invites = vec![];
-            for member in &room.members {
-                let member_client = clients.get(member).ok_or_else(|| {
-                    anyhow!(
-                        "Cannot invite user {}: we haven't created this user.",
-                        member
-                    )
-                })?;
-                let user_id = member_client
-                    .user_id()
-                    .await
-                    .ok_or_else(|| anyhow!("Cannot determine full user id for user {}.", member))?;
-                if my_user_id == user_id {
-                    // Don't invite oneself.
-                    continue;
+                if let Some(ref topic) = room.topic {
+                    request.topic = Some(topic.as_ref());
                 }
-                invites.push(user_id);
-            }
-            request.invite = &invites;
-            let room_id = client.create_room(request).await?.room_id;
 
-            // Respond to invites.
-            for member in &room.members {
-                let member_client = clients.get(member).unwrap(); // We checked this a few lines ago.
-                member_client.join_room_by_id(&room_id).await?;
+                // Place invites.
+                let mut invites = vec![];
+                for member in &room.members {
+                    let member_client = clients.get(member).ok_or_else(|| {
+                        anyhow!(
+                            "Cannot invite user {}: we haven't created this user.",
+                            member
+                        )
+                    })?;
+                    let user_id = member_client.user_id().await.ok_or_else(|| {
+                        anyhow!("Cannot determine full user id for user {}.", member)
+                    })?;
+                    if my_user_id == user_id {
+                        // Don't invite oneself.
+                        continue;
+                    }
+                    invites.push(user_id);
+                }
+                request.invite = &invites;
+                match client.create_room(request).await {
+                    Ok(response) => {
+                        let room_id = response.room_id;
+                        // Respond to invites.
+                        for member in &room.members {
+                            let member_client = clients.get(member).unwrap(); // We checked this a few lines ago.
+                            member_client.join_room_by_id(&room_id).await?;
+                        }
+                        break;
+                    }
+                    Err(err) => match err.as_ruma_error() {
+                        Some(ref ruma) if ruma.kind == ErrorKind::RoomInUse => {
+                            warn!("Room alias {:?} already in use, trying again to remove and recreate", room.alias);
+                            continue;
+                        }
+                        _ => return Err(err.into()),
+                    },
+                }
             }
         }
     }
