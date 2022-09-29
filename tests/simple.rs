@@ -158,7 +158,7 @@ async fn test_create_users() {
     );
 
     // Now check whether the admin can use the user API and others can't.
-    let request = synapse_admin_api::users::get_details::v2::Request::new(regular_user_id.as_ref());
+    let request = synapse_admin_api::users::get_details::v2::Request::new(&regular_user_id);
     let response = admin_client
         .send(request, None)
         .await
@@ -171,8 +171,7 @@ async fn test_create_users() {
         &regular_user_client,
         &regular_user_client_with_custom_password,
     ] {
-        let request =
-            synapse_admin_api::users::get_details::v2::Request::new(regular_user_id.as_ref());
+        let request = synapse_admin_api::users::get_details::v2::Request::new(&regular_user_id);
         client
             .send(request, None)
             .await

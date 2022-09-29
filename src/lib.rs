@@ -22,8 +22,9 @@ use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
+    sync::Arc,
 };
 
 use anyhow::{anyhow, Context, Error};
@@ -46,6 +47,7 @@ use futures_util::stream::StreamExt;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::{debug, error, warn};
+use rand::distributions::{Alphanumeric, DistString};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio_util::codec::{BytesCodec, FramedRead};
@@ -246,6 +248,18 @@ pub struct Config {
     #[serde(default)]
     #[builder(default)]
     pub modules: Vec<ModuleConfig>,
+
+    /// Appservices to install in Synapse.
+    #[serde(default)]
+    #[builder(default)]
+    pub appservices: AllAppservicesConfig,
+
+    /// Additional resources to copy from the **host** into the **guest**.
+    /// Key: Guest path, relative to `/`.
+    /// Value: Host path, relative to the project directory.
+    #[serde(default)]
+    #[builder(default)]
+    copy: HashMap<String, String>,
 
     #[serde(default)]
     #[builder(default)]
@@ -488,6 +502,32 @@ impl Config {
             modules_root.push(module.config.clone());
         }
 
+        // Link appservice config.
+        let appservices_root = combined_config
+            .entry("app_service_config_files".into())
+            .or_insert_with(|| yaml!([]))
+            .to_seq_mut()
+            .ok_or_else(|| {
+                anyhow!(
+                    "In homeserver.yaml, expected a sequence for key `app_service_config_files`"
+                )
+            })?;
+        for appservice in self
+            .appservices
+            .host
+            .iter()
+            .chain(self.appservices.guest.iter())
+        {
+            let mut path_buf = PathBuf::new();
+            path_buf.push("appservices");
+            path_buf.push(appservice.name.as_ref());
+            path_buf.set_extension("yml");
+            let path = path_buf.to_str().with_context(|| {
+                format!("Cannot convert path {:?} to a well-formed string", path_buf)
+            })?;
+            appservices_root.push(path.into());
+        }
+
         if self.workers.enabled {
             for (key, value) in std::iter::IntoIterator::into_iter([
                 // No worker support without redis.
@@ -603,6 +643,12 @@ impl Config {
         self.synapse_root().join("data")
     }
 
+    /// The directory in which we store files that have been generated
+    /// by mx-tester for use by the user (e.g. appservice files).
+    pub fn generated_user_files_dir(&self) -> PathBuf {
+        self.test_root().join("out")
+    }
+
     /// The directory in which we're putting the configuration of workers for this test.
     pub fn synapse_workers_dir(&self) -> PathBuf {
         self.synapse_root().join("workers")
@@ -621,6 +667,13 @@ impl Config {
 
     pub fn scripts_logs_dir(&self) -> PathBuf {
         self.logs_dir().join("mx-tester")
+    }
+
+    pub fn generated_appservice_path(&self, name: &str) -> PathBuf {
+        self.generated_user_files_dir()
+            .join("appservice")
+            .join(name)
+            .with_extension("yml")
     }
 
     /// A tag for the Docker image we're creating/using.
@@ -764,7 +817,8 @@ pub struct ModuleConfig {
     /// specified by environment variable `MX_TEST_MODULE_DIR`.
     ///
     /// This script will be executed in the **host**.
-    build: Script,
+    #[serde(default)]
+    build: Option<Script>,
 
     /// A script to install dependencies.
     ///
@@ -792,6 +846,106 @@ pub struct ModuleConfig {
     ///   key: value
     /// ```
     config: serde_yaml::Value,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct AllAppservicesConfig {
+    /// AppServices running in the guest.
+    #[serde(default)]
+    guest: Vec<AppServiceConfig>,
+
+    /// AppServices running on the host.
+    #[serde(default)]
+    host: Vec<AppServiceConfig>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct AppServiceConfig {
+    /// The unique (to the homeserver) identifier of the AppService.
+    name: Arc<str>,
+
+    /// The (local) URL at which to communicate with the AppService,
+    /// including a port number.
+    ///
+    /// This will typically be
+    /// - `http://localhost:XXXX` if the AppService is running within the container
+    /// - `http://host.docker.internal:XXXX` if the AppService is running on the host.
+    url: url::Url,
+
+    /// The secret token used by the homeserver to send messages to
+    /// the AppService.
+    ///
+    /// If none is provided, mx-tester will autogenerate one.
+    #[serde(default = "AppServiceConfig::default_as_token")]
+    as_token: Arc<str>,
+
+    /// The secret token used by the AppService to send messages to
+    /// the homeserver.
+    ///
+    /// If none is provided, mx-tester will autogenerate one.
+    #[serde(default = "AppServiceConfig::default_hs_token")]
+    hs_token: Arc<str>,
+
+    /// The localpart of the userid for the virtual user created
+    /// for the AppService.
+    sender_localpart: Arc<str>,
+
+    /// Namespaces controlled or monitored by this AppService.
+    namespaces: AppServiceNamespacesConfig,
+}
+
+impl AppServiceConfig {
+    /// Randomly generate an as_token.
+    ///
+    /// As a debugging aid, it is always prefixed with `as-`.
+    fn default_as_token() -> Arc<str> {
+        let string = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
+        format!("as-{}", string).into()
+    }
+
+    /// Randomly generate an hs_token.
+    ///
+    /// As a debugging aid, it is always prefixed with `hs-`.
+    fn default_hs_token() -> Arc<str> {
+        let string = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);
+        format!("hs-{}", string).into()
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct AppServiceNamespacesConfig {
+    /// The `users` namespace.
+    #[serde(default = "AppServiceNamespacesConfig::default_namespaces")]
+    users: Arc<[AppServiceNamespaceConfig]>,
+
+    /// The `aliases` namespace.
+    #[serde(default = "AppServiceNamespacesConfig::default_namespaces")]
+    aliases: Arc<[AppServiceNamespaceConfig]>,
+
+    /// The `rooms` namespace.
+    #[serde(default = "AppServiceNamespacesConfig::default_namespaces")]
+    rooms: Arc<[AppServiceNamespaceConfig]>,
+}
+impl AppServiceNamespacesConfig {
+    /// The default (empty) namespace.
+    fn default_namespaces() -> Arc<[AppServiceNamespaceConfig]> {
+        vec![].into()
+    }
+}
+
+/// An AppService namespace
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AppServiceNamespaceConfig {
+    /// The subset of the domain covered by the namespace.
+    ///
+    /// e.g. `mx-tester-*` represents the namespace of users
+    /// whose id localpart starts with `mx-tester-`.
+    regex: String,
+
+    /// If `true`, only this AppService is allowed to create
+    /// users (or rooms, or aliases) with this name.
+    #[serde(default)]
+    exclusive: bool,
 }
 
 /// A script for `up`.
@@ -1172,20 +1326,21 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     let mut env = config.shared_env_variables()?;
 
     for module in &config.modules {
-        let path = synapse_root.join(&module.name);
-        env.insert(&*MX_TEST_MODULE_DIR, path.as_os_str().into());
-        debug!(
-            "Calling build script for module {} with MX_TEST_DIR={:#?}",
-            &module.name, path
-        );
-        let log_dir = modules_log_dir.join(&module.name);
-        std::fs::create_dir_all(&log_dir)
-            .with_context(|| format!("Could not create directory {:#?}", log_dir,))?;
-        module
-            .build
-            .run("build", &log_dir, &env)
-            .await
-            .context("Error running build script")?;
+        if let Some(ref script) = module.build {
+            let path = synapse_root.join(&module.name);
+            env.insert(&*MX_TEST_MODULE_DIR, path.as_os_str().into());
+            debug!(
+                "Calling build script for module {} with MX_TEST_DIR={:#?}",
+                &module.name, path
+            );
+            let log_dir = modules_log_dir.join(&module.name);
+            std::fs::create_dir_all(&log_dir)
+                .with_context(|| format!("Could not create directory {:#?}", log_dir,))?;
+            script
+                .run("build", &log_dir, &env)
+                .await
+                .context("Error running build script")?;
+        }
         debug!("Completed one module.");
     }
     println!("** building modules success");
@@ -1237,6 +1392,53 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
         }
     }
 
+    // Generate {appservice}.yml for appservices running on the host.
+    let generate_appservice_yml =
+        |appservice: &AppServiceConfig, host: &str, path: &Path| -> Result<(), Error> {
+            let mut config = appservice.clone();
+            config.url.set_host(Some(host))?;
+            let writer = std::fs::File::create(&path)
+                .with_context(|| format!("Failed to create file {:?}", path))?;
+            serde_yaml::to_writer(writer, &config)
+                .with_context(|| format!("Failed to write file {:?}", path))?;
+            Ok(())
+        };
+
+    let guest_appservices_root = synapse_root.join("appservices");
+    let host_appservices_root = config.generated_user_files_dir().join("appservices");
+
+    // The (guest) Synapse sees them as running on `host.docker.internal`,
+    // while the (host) AppService see themselves as running on `localhost`.
+    for appservice in &config.appservices.host {
+        // Guest file
+        let guest_path = guest_appservices_root
+            .join(appservice.name.as_ref())
+            .with_extension("yml");
+        generate_appservice_yml(appservice, "host.docker.internal", &guest_path)?;
+        // Host file
+        let host_path = host_appservices_root
+            .join(appservice.name.as_ref())
+            .with_extension("yml");
+        generate_appservice_yml(appservice, "localhost", &host_path)?;
+        eprintln!(
+            "Configuration file for appservice {} has been generated at {:?}",
+            appservice.name, host_path
+        );
+    }
+    // Generate {appservice}.yml for appservices running on the guest.
+    // Both Synapse and the AppService see them as running on `localhost`.
+    for appservice in &config.appservices.guest {
+        let sub_path = Path::new("appservices")
+            .join(appservice.name.as_ref())
+            .with_extension("yml");
+        let path = synapse_root.join(&sub_path);
+        generate_appservice_yml(appservice, "localhost", &path)?;
+        eprintln!(
+            "Configuration file for appservice {} has been generated at guest path {:?}",
+            appservice.name, sub_path
+        );
+    }
+
     // Prepare Dockerfile including modules.
     let dockerfile_content = format!("
 # A custom Dockerfile to rebuild synapse from the official release + plugins
@@ -1260,39 +1462,44 @@ RUN echo \"mx-tester:password\" | chpasswd
 # Show the Synapse version, to aid with debugging.
 RUN pip show matrix-synapse
 
+RUN mkdir /mx-tester
+{global_copy}
+
 {maybe_setup_workers}
 
 # Copy and install custom modules.
-RUN mkdir /mx-tester
-{setup}
-{env}
-{copy_modules}
-{copy_resources}
-{install}
+{modules_setup}
+{modules_env}
+{modules_copy}
+{modules_copy_resources}
+{modules_install}
 
 ENTRYPOINT []
 
 EXPOSE {synapse_http_port}/tcp 8009/tcp 8448/tcp
 ",
+    global_copy = config.copy.keys()
+        .map(|dest| format!("COPY {dest} {dest}"))
+        .format("\n"),
     docker_tag = docker_tag,
     // Module setup steps, as per `config.modules[_].install`.
-    setup = config.modules.iter()
+    modules_setup = config.modules.iter()
         .filter_map(|module| module.install.as_ref().map(|script| format!("## Setup {}\n{}\n", module.name, script.lines.iter().map(|line| format!("RUN {}", line)).format("\n"))))
         .format("\n"),
     // Module env changes, as per `config.modules[_].env`.
-    env = config.modules.iter()
+    modules_env = config.modules.iter()
         .map(|module| module.env.iter()
             .map(|(key, value)| format!("ENV {}={}\n", key, value))
             .format("")
         ).format(""),
-    copy_modules = config.modules.iter()
+    modules_copy = config.modules.iter()
         // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
-        .map(|module| format!("COPY {module} /mx-tester/{module}", module=module.name))
+        .map(|module| format!("COPY {module} /mx-tester/modules/{module}", module=module.name))
         .format("\n"),
     // Modules additional resources, as per `config.modules[_].copy`.
-    copy_resources = config.modules.iter()
+    modules_copy_resources = config.modules.iter()
         .map(|module| module.copy.iter()
-            .map(move |(dest, source)| format!("COPY {source} /mx-tester/{module}/{dest}\n",
+            .map(move |(dest, source)| format!("COPY {source} /mx-tester/modules/{module}/{dest}\n",
                 dest = dest,
                 source = source,
                 module = module.name,
@@ -1300,9 +1507,9 @@ EXPOSE {synapse_http_port}/tcp 8009/tcp 8448/tcp
             .format("")
         ).format(""),
     // Modules copy and `pip` install.
-    install = config.modules.iter()
+    modules_install = config.modules.iter()
         // FIXME: We probably want to test what happens with weird characters. Perhaps we'll need to somehow escape module.
-        .map(|module| format!("RUN /usr/local/bin/python -m pip install /mx-tester/{module}", module=module.name))
+        .map(|module| format!("RUN /usr/local/bin/python -m pip install /mx-tester/modules/{module}", module=module.name))
         .format("\n"),
     // Configure user id.
     maybe_uid = {
@@ -1347,6 +1554,45 @@ RUN chmod ugo+rx /workers_start.py && chown mx-tester /workers_start.py
     let dockerfile_path = synapse_root.join("Dockerfile");
     std::fs::write(&dockerfile_path, dockerfile_content)
         .with_context(|| format!("Could not write file {:#?}", dockerfile_path,))?;
+
+    debug!("Copying global resources");
+    let curdir = std::env::current_dir()?;
+    let copy_resource = |dest, source| -> Result<(), Error> {
+        // Remove leading slashes.
+        let mut dest_path = std::path::Path::new(dest);
+        if dest_path.has_root() {
+            dest_path = dest_path.strip_prefix("/")?;
+        }
+        let source_path = curdir.join(source);
+        let dest_path = synapse_root.join(dest_path);
+        if dest_path.is_dir() {
+            std::fs::create_dir_all(&dest_path).with_context(|| {
+                format!(
+                    "Failed to create directory {:?} (for resource {})",
+                    dest_path, source
+                )
+            })?;
+        } else {
+            if let Some(parent) = dest_path.parent() {
+                std::fs::create_dir_all(&parent).with_context(|| {
+                    format!(
+                        "Failed to create parent directory {:?} (for resource {})",
+                        parent, source
+                    )
+                })?;
+            }
+        }
+        std::fs::copy(&source_path, &dest_path).with_context(|| {
+            format!(
+                "Failed to copy {} => {} ({:?} => {:?})",
+                source, dest, source_path, dest_path
+            )
+        })?;
+        Ok(())
+    };
+    for (dest, source) in &config.copy {
+        copy_resource(dest, source).context("Failed to copy global resource")?;
+    }
 
     debug!("Building tar file");
     let docker_dir_path = config.test_root().join("tar");

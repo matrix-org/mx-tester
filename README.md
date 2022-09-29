@@ -132,7 +132,7 @@ users:
       # Default: No invites.
 
 
-# --- Configuring the homeserver
+# --- Configuring the homeserver. Optional.
 
 synapse:
   # Optionally, a version of Synapse.
@@ -186,7 +186,86 @@ homeserver:
   ...
     # Any other field to be copied in homeserver.yaml.
 
-# --- Docker configuration
+appservices:
+  # Optional. Define Matrix Application Services to be connected
+  # with your homeserver. For more details on AppServices, see
+  # https://spec.matrix.org/v1.2/application-service-api .
+  host:
+    # Optional. Application Services whose process is running on
+    # the host.
+    name:
+      # String. The name of the AppService. Each AppService on this
+      # homeserver should have a distinct name.
+    url:
+      # String. The (local) URL at which to communicate with the AppService,
+      # including a port number, e.g. "http://localhost:8765".
+      # Note that the host is actually IGNORED.
+    as_token:
+      # Optional. String. If specified, a token used by the homeserver
+      # when sending messages to the AppService.
+      # By default, generate a random token automatically during `build`.
+      # See the generated appservice file to determine its value.
+    hs_token:
+      # Optional. String. If specified, a token used by the AppService
+      # when sending messages to the homeserver.
+      # By default, generate a random token automatically during `build`.
+      # See the generated appservice file to determine its value.
+    sender_localpart:
+      # String. The localpart of the userid of the user that will be
+      # used when this AppService sends messages.
+    namespaces:
+      # The namespaces controlled or monitored by this AppService.
+      users:
+        # Optional. Empty by default.
+        - regex:
+            # A set of users to control or monitor.
+            # Regex are matched against the full user id, including sigil
+            # and homeserver name.
+          exclusive:
+            # Optional. Boolean. False by default.
+            # If `true`, the AppService is in charge of all users whose
+            # id matches the regex. Otherwise, the AppService will only
+            # be informed of the actions of these users.
+      rooms:
+        # Optional. Empty by default.
+        - regex:
+            # A set of rooms to control or monitor.
+            # Regex are matched against the full room id, including sigil
+            # and homeserver name.
+          exclusive:
+            # Optional. Boolean. False by default.
+            # If `true`, the AppService is in charge of all rooms whose
+            # id matches the regex. Otherwise, the AppService will only
+            # be informed of the actions in these rooms.
+      aliases:
+        # Optional. Empty by default.
+        - regex:
+            # A set of room alises to control or monitor.
+            # Regex are matched against the full alias, including sigil
+            # and homeserver name.
+          exclusive:
+            # Optional. Boolean. False by default.
+            # If `true`, the AppService is in charge of all rooms whose
+            # alias matches the regex. Otherwise, the AppService will only
+            # be informed of the actions in these aliases.
+  guest:
+    # Optional. Application Services whose process is running on the guest.
+    # Same fields as `host`.
+
+# --- Additional resources. Optional.
+
+copy:
+  # Optional. Additional resources to copy.
+  # Paths on the guest are relative to the guest root.
+  # Paths on the host are relative to the directory from which mx-tester
+  # is launched.
+  # As of this writing, only individual files are copied, no globs or
+  # subdirectories.
+  # Guest directories are created if necessary.
+  "/path/on/the/guest": "path/on/the/host"
+  # ...
+
+# --- Docker configuration. Optional.
 
 docker:
   # Optional. Additional configuration for Docker.
@@ -218,7 +297,7 @@ credentials:
   # Default: No server.
   # May be overridden from the command-line with parameter `--server`.
 
-# Optional
+# --- Worker configuration. Optional. CURRENTLY IGNORED.
 workers:
   enabled:
   # A boolean. Specify `true` to launch Synapse with workers.
