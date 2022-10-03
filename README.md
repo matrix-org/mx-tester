@@ -297,7 +297,7 @@ credentials:
   # Default: No server.
   # May be overridden from the command-line with parameter `--server`.
 
-# --- Worker configuration. Optional. CURRENTLY IGNORED.
+# --- Worker configuration. Optional. CURRENTLY NOT MAINTAINED.
 workers:
   enabled:
   # A boolean. Specify `true` to launch Synapse with workers.
