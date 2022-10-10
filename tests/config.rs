@@ -39,7 +39,7 @@ async fn test_default_rate_limit() {
                 .as_mapping()
                 .unwrap_or_else(|| panic!("Invalid {}", category));
             let (name, mapping) = match maybe_subcategory {
-                None => (format!("{}", category), per_category),
+                None => (category.to_string(), per_category),
                 Some(sub) => (
                     format!("{}.{}", category, sub),
                     per_category
@@ -138,7 +138,7 @@ async fn test_synapse_provides_rate_limit() {
                     .as_mapping()
                     .unwrap_or_else(|| panic!("Invalid {}", category));
                 let (name, mapping) = match maybe_subcategory {
-                    None => (format!("{}", category), per_category),
+                    None => (category.to_string(), per_category),
                     Some(sub) => (
                         format!("{}.{}", category, sub),
                         per_category
