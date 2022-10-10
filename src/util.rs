@@ -86,6 +86,7 @@ macro_rules! seq {
     };
     // With trailing `,`.
     ( $container: expr, [ $( $v:expr ),+, ] ) => {
+        #[allow(clippy::vec_init_then_push)]
         {
             let mut container = $container;
             $(

@@ -1,4 +1,4 @@
-use std::{ffi::OsStr, path::PathBuf, process::Stdio};
+use std::{ffi::OsStr, path::Path, path::PathBuf, process::Stdio};
 
 use anyhow::{anyhow, Context, Error};
 use async_trait::async_trait;
@@ -58,7 +58,7 @@ where
     T: 'static + Send,
 {
     debug!("Storing {} logs in {:?}", name, dest);
-    let command = format!("\ncommand: {}\n", command.to_string());
+    let command = format!("\ncommand: {}\n", command);
     tokio::task::spawn(async move {
         let mut file = OpenOptions::new()
             .create(true)
@@ -110,7 +110,7 @@ pub trait CommandExt {
     /// Spawn a command, logging its stdout/stderr to files and to the env logger.
     async fn spawn_logged(
         &mut self,
-        log_dir: &PathBuf,
+        log_dir: &Path,
         name: &'static str,
         line: &str,
     ) -> Result<(), Error>;
@@ -120,7 +120,7 @@ pub trait CommandExt {
 impl CommandExt for Command {
     async fn spawn_logged(
         &mut self,
-        log_dir: &PathBuf,
+        log_dir: &Path,
         name: &'static str,
         line: &str,
     ) -> Result<(), Error> {

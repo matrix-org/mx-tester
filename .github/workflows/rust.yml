@@ -24,5 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
-    - name: Style linters
+    - name: Code linter
+      run: cargo clippy -- -D warnings
+    - name: Style linter
       run: cargo fmt -- --check
