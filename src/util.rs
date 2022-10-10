@@ -88,6 +88,7 @@ macro_rules! seq {
     ( $container: expr, [ $( $v:expr ),+, ] ) => {
         {
             let mut container = $container;
+            let _ = (); // Silence persistent clippy warning.
             $(
                 container.push($v.into());
             )*

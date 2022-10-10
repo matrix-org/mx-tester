@@ -438,7 +438,7 @@ impl Config {
                 yaml!({
                     "per_room" => large_rate_limit.clone(),
                     "per_user" => large_rate_limit.clone(),
-                    "per_sender" => large_rate_limit.clone(),
+                    "per_sender" => large_rate_limit,
                 }),
             ),
         ] {
@@ -776,7 +776,7 @@ impl Script {
     pub async fn run(
         &self,
         stage: &'static str,
-        log_dir: &PathBuf,
+        log_dir: &Path,
         env: &HashMap<&'static OsStr, OsString>,
     ) -> Result<(), Error> {
         debug!("Running with environment variables {:#?}", env);
@@ -1899,7 +1899,7 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
         Err(bollard::errors::Error::DockerResponseServerError {
             message,
             status_code,
-        }) if status_code >= 200 && status_code < 300 => {
+        }) if (200..300).contains(&status_code) => {
             debug!(target: "mx-tester-down", "Synapse container stopped: {}", message);
             Ok(())
         }
@@ -1928,7 +1928,7 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
         Err(bollard::errors::Error::DockerResponseServerError {
             message,
             status_code,
-        }) if status_code >= 200 && status_code < 300 => {
+        }) if (200..300).contains(&status_code) => {
             debug!(target: "mx-tester-down", "Synapse container removed: {}", message);
             Ok(())
         }
@@ -1958,7 +1958,7 @@ pub async fn down(docker: &Docker, config: &Config, status: Status) -> Result<()
         Err(bollard::errors::Error::DockerResponseServerError {
             message,
             status_code,
-        }) if status_code >= 200 && status_code < 300 => {
+        }) if (200..300).contains(&status_code) => {
             debug!(target: "mx-tester-down", "Network removed: {}", message);
             Ok(())
         }
@@ -2079,7 +2079,7 @@ impl DockerExt for Docker {
 
     async fn wait_container_removed(&self, name: &str) -> Result<(), Error> {
         let mut stream = self.wait_container(
-            &name,
+            name,
             Some(WaitContainerOptions {
                 condition: "removed",
             }),

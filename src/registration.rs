@@ -329,7 +329,7 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
                 match client
                     .send(
                         matrix_sdk::ruma::api::client::alias::delete_alias::v3::Request::new(
-                            &room_alias_id,
+                            room_alias_id,
                         ),
                         None,
                     )
