@@ -671,7 +671,7 @@ impl Config {
 
     pub fn generated_appservice_path(&self, name: &str) -> PathBuf {
         self.generated_user_files_dir()
-            .join("appservice")
+            .join("appservices")
             .join(name)
             .with_extension("yml")
     }
@@ -848,18 +848,20 @@ pub struct ModuleConfig {
     config: serde_yaml::Value,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default, TypedBuilder)]
 pub struct AllAppservicesConfig {
     /// AppServices running in the guest.
     #[serde(default)]
+    #[builder(default)]
     guest: Vec<AppServiceConfig>,
 
     /// AppServices running on the host.
     #[serde(default)]
+    #[builder(default)]
     host: Vec<AppServiceConfig>,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, TypedBuilder)]
 pub struct AppServiceConfig {
     /// The unique (to the homeserver) identifier of the AppService.
     name: Arc<str>,
@@ -877,6 +879,7 @@ pub struct AppServiceConfig {
     ///
     /// If none is provided, mx-tester will autogenerate one.
     #[serde(default = "AppServiceConfig::default_as_token")]
+    #[builder(default = AppServiceConfig::default_as_token())]
     as_token: Arc<str>,
 
     /// The secret token used by the AppService to send messages to
@@ -884,6 +887,7 @@ pub struct AppServiceConfig {
     ///
     /// If none is provided, mx-tester will autogenerate one.
     #[serde(default = "AppServiceConfig::default_hs_token")]
+    #[builder(default = AppServiceConfig::default_hs_token())]
     hs_token: Arc<str>,
 
     /// The localpart of the userid for the virtual user created
@@ -891,6 +895,8 @@ pub struct AppServiceConfig {
     sender_localpart: Arc<str>,
 
     /// Namespaces controlled or monitored by this AppService.
+    #[serde(default)]
+    #[builder(default)]
     namespaces: AppServiceNamespacesConfig,
 }
 
@@ -912,24 +918,32 @@ impl AppServiceConfig {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-struct AppServiceNamespacesConfig {
+#[derive(Deserialize, Serialize, Debug, Clone, TypedBuilder)]
+pub struct AppServiceNamespacesConfig {
     /// The `users` namespace.
     #[serde(default = "AppServiceNamespacesConfig::default_namespaces")]
+    #[builder(default = AppServiceNamespacesConfig::default_namespaces())]
     users: Arc<[AppServiceNamespaceConfig]>,
 
     /// The `aliases` namespace.
     #[serde(default = "AppServiceNamespacesConfig::default_namespaces")]
+    #[builder(default = AppServiceNamespacesConfig::default_namespaces())]
     aliases: Arc<[AppServiceNamespaceConfig]>,
 
     /// The `rooms` namespace.
     #[serde(default = "AppServiceNamespacesConfig::default_namespaces")]
+    #[builder(default = AppServiceNamespacesConfig::default_namespaces())]
     rooms: Arc<[AppServiceNamespaceConfig]>,
 }
 impl AppServiceNamespacesConfig {
     /// The default (empty) namespace.
     fn default_namespaces() -> Arc<[AppServiceNamespaceConfig]> {
         vec![].into()
+    }
+}
+impl Default for AppServiceNamespacesConfig {
+    fn default() -> Self {
+        AppServiceNamespacesConfig::builder().build()
     }
 }
 
@@ -1395,6 +1409,11 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
     // Generate {appservice}.yml for appservices running on the host.
     let generate_appservice_yml =
         |appservice: &AppServiceConfig, host: &str, path: &Path| -> Result<(), Error> {
+            let parent = path
+                .parent()
+                .ok_or_else(|| anyhow!("Incorrect path {:?}, expected an absolute path", path))?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory {:?}", parent))?;
             let mut config = appservice.clone();
             config.url.set_host(Some(host))?;
             let writer = std::fs::File::create(&path)
@@ -1572,15 +1591,13 @@ RUN chmod ugo+rx /workers_start.py && chown mx-tester /workers_start.py
                     dest_path, source
                 )
             })?;
-        } else {
-            if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(&parent).with_context(|| {
-                    format!(
-                        "Failed to create parent directory {:?} (for resource {})",
-                        parent, source
-                    )
-                })?;
-            }
+        } else if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(&parent).with_context(|| {
+                format!(
+                    "Failed to create parent directory {:?} (for resource {})",
+                    parent, source
+                )
+            })?;
         }
         std::fs::copy(&source_path, &dest_path).with_context(|| {
             format!(

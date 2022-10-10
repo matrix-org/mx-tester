@@ -5,6 +5,7 @@
 
 use std::ops::Not;
 
+use anyhow::Context;
 use log::info;
 use mx_tester::{self, cleanup::Cleanup, registration::User, *};
 
@@ -221,6 +222,43 @@ async fn test_repeat() {
             .await
             .expect("Failed in step `down`");
     }
+}
+
+/// Simple test: repeat numerous times up/down, to increase the
+/// chances of hitting one the cases in which Synapse fails
+/// during startup.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_empty_appservice() {
+    let docker = DOCKER.clone();
+    let config = Config::builder()
+        .name("test-appservice".into())
+        .synapse(SynapseVersion::Docker {
+            tag: SYNAPSE_VERSION.into(),
+        })
+        .appservices(
+            AllAppservicesConfig::builder()
+                .host(vec![AppServiceConfig::builder()
+                    .name("some-appservice".into())
+                    .url("http://host:8888".parse().unwrap())
+                    .sender_localpart("_ghost".into())
+                    .build()])
+                .build(),
+        )
+        .build()
+        .assign_port();
+    let _ = Cleanup::new(&config);
+    mx_tester::build(&docker, &config)
+        .await
+        .expect("Failed in step `build`");
+    let path = config.generated_appservice_path("some-appservice");
+    let generated = std::fs::read_to_string(&path)
+        .with_context(|| format!("Could not read appservice file at {:?}", path))
+        .unwrap();
+    assert!(
+        generated.contains("http://localhost:8888"),
+        "Could not find generated host. Got {}",
+        generated
+    );
 }
 
 /*
