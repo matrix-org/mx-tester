@@ -3,7 +3,7 @@
 //! Each test needs to use #[tokio::test(flavor = "multi_thread")], as this
 //! is needed for auto-cleanup in case of failure.
 
-use std::ops::Not;
+use std::{collections::HashMap, ops::Not};
 
 use anyhow::Context;
 use log::info;
@@ -241,6 +241,7 @@ async fn test_empty_appservice() {
                     .name("some-appservice".into())
                     .url("http://host:8888".parse().unwrap())
                     .sender_localpart("_ghost".into())
+                    .extra_fields(dict!(HashMap::new(), { "another-field" => 0 }))
                     .build()])
                 .build(),
         )
@@ -250,15 +251,21 @@ async fn test_empty_appservice() {
     mx_tester::build(&docker, &config)
         .await
         .expect("Failed in step `build`");
+    mx_tester::up(&docker, &config).await.expect_err(
+        "Step `up` should not be able to complete as we don't really have an appservice",
+    );
     let path = config.generated_appservice_path("some-appservice");
     let generated = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read appservice file at {:?}", path))
         .unwrap();
-    assert!(
-        generated.contains("http://localhost:8888"),
-        "Could not find generated host. Got {}",
-        generated
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&generated)
+        .with_context(|| format!("Could not parse appservice file at {:?}", path))
+        .unwrap();
+    assert_eq!(
+        yaml["url"],
+        serde_yaml::Value::from("http://localhost:8888/"),
     );
+    assert_eq!(yaml["another-field"], serde_yaml::Value::from(0));
 }
 
 /*

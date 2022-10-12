@@ -898,6 +898,11 @@ pub struct AppServiceConfig {
     #[serde(default)]
     #[builder(default)]
     namespaces: AppServiceNamespacesConfig,
+
+    #[serde(flatten)]
+    #[builder(default)]
+    /// Any extra fields in the appservice config.
+    pub extra_fields: HashMap<String, serde_yaml::Value>,
 }
 
 impl AppServiceConfig {
@@ -1406,58 +1411,6 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
         }
     }
 
-    // Generate {appservice}.yml for appservices running on the host.
-    let generate_appservice_yml =
-        |appservice: &AppServiceConfig, host: &str, path: &Path| -> Result<(), Error> {
-            let parent = path
-                .parent()
-                .ok_or_else(|| anyhow!("Incorrect path {:?}, expected an absolute path", path))?;
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory {:?}", parent))?;
-            let mut config = appservice.clone();
-            config.url.set_host(Some(host))?;
-            let writer = std::fs::File::create(&path)
-                .with_context(|| format!("Failed to create file {:?}", path))?;
-            serde_yaml::to_writer(writer, &config)
-                .with_context(|| format!("Failed to write file {:?}", path))?;
-            Ok(())
-        };
-
-    let guest_appservices_root = synapse_root.join("appservices");
-    let host_appservices_root = config.generated_user_files_dir().join("appservices");
-
-    // The (guest) Synapse sees them as running on `host.docker.internal`,
-    // while the (host) AppService see themselves as running on `localhost`.
-    for appservice in &config.appservices.host {
-        // Guest file
-        let guest_path = guest_appservices_root
-            .join(appservice.name.as_ref())
-            .with_extension("yml");
-        generate_appservice_yml(appservice, "host.docker.internal", &guest_path)?;
-        // Host file
-        let host_path = host_appservices_root
-            .join(appservice.name.as_ref())
-            .with_extension("yml");
-        generate_appservice_yml(appservice, "localhost", &host_path)?;
-        eprintln!(
-            "Configuration file for appservice {} has been generated at {:?}",
-            appservice.name, host_path
-        );
-    }
-    // Generate {appservice}.yml for appservices running on the guest.
-    // Both Synapse and the AppService see them as running on `localhost`.
-    for appservice in &config.appservices.guest {
-        let sub_path = Path::new("appservices")
-            .join(appservice.name.as_ref())
-            .with_extension("yml");
-        let path = synapse_root.join(&sub_path);
-        generate_appservice_yml(appservice, "localhost", &path)?;
-        eprintln!(
-            "Configuration file for appservice {} has been generated at guest path {:?}",
-            appservice.name, sub_path
-        );
-    }
-
     // Prepare Dockerfile including modules.
     let dockerfile_content = format!("
 # A custom Dockerfile to rebuild synapse from the official release + plugins
@@ -1777,6 +1730,59 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     config
         .patch_homeserver_config()
         .context("Error updating homeserver config")?;
+
+    // Generate {appservice}.yml for appservices running on the host.
+    let generate_appservice_yml =
+        |appservice: &AppServiceConfig, host: &str, path: &Path| -> Result<(), Error> {
+            let parent = path
+                .parent()
+                .ok_or_else(|| anyhow!("Incorrect path {:?}, expected an absolute path", path))?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory {:?}", parent))?;
+            let mut config = appservice.clone();
+            config.url.set_host(Some(host))?;
+
+            let writer = std::fs::File::create(&path)
+                .with_context(|| format!("Failed to create file {:?}", path))?;
+            serde_yaml::to_writer(writer, &config)
+                .with_context(|| format!("Failed to write file {:?}", path))?;
+            Ok(())
+        };
+
+    //let synapse_root = config.synapse_root();
+    let guest_appservices_root = config.synapse_data_dir().join("appservices");
+    let host_appservices_root = config.generated_user_files_dir().join("appservices");
+
+    // The (guest) Synapse sees them as running on `host.docker.internal`,
+    // while the (host) AppService see themselves as running on `localhost`.
+    for appservice in &config.appservices.host {
+        // Guest file
+        let guest_path = guest_appservices_root
+            .join(appservice.name.as_ref())
+            .with_extension("yml");
+        generate_appservice_yml(appservice, "host.docker.internal", &guest_path)?;
+        // Host file
+        let host_path = host_appservices_root
+            .join(appservice.name.as_ref())
+            .with_extension("yml");
+        generate_appservice_yml(appservice, "localhost", &host_path)?;
+        eprintln!(
+            "Configuration file for appservice {} has been generated at {:?}",
+            appservice.name, host_path
+        );
+    }
+    // Generate {appservice}.yml for appservices running on the guest.
+    // Both Synapse and the AppService see them as running on `localhost`.
+    for appservice in &config.appservices.guest {
+        let path = guest_appservices_root
+            .join(appservice.name.as_ref())
+            .with_extension("yml");
+        generate_appservice_yml(appservice, "localhost", &path)?;
+        eprintln!(
+            "Configuration file for appservice {} has been generated at path {:?}",
+            appservice.name, path
+        );
+    }
 
     // Docker has a tendency to return before containers are fully torn down.
     // Let's make extra-sure by waiting until the container is not running
