@@ -3,8 +3,9 @@
 //! Each test needs to use #[tokio::test(flavor = "multi_thread")], as this
 //! is needed for auto-cleanup in case of failure.
 
-use std::ops::Not;
+use std::{collections::HashMap, ops::Not};
 
+use anyhow::Context;
 use log::info;
 use mx_tester::{self, cleanup::Cleanup, registration::User, *};
 
@@ -158,7 +159,7 @@ async fn test_create_users() {
     );
 
     // Now check whether the admin can use the user API and others can't.
-    let request = synapse_admin_api::users::get_details::v2::Request::new(regular_user_id.as_ref());
+    let request = synapse_admin_api::users::get_details::v2::Request::new(&regular_user_id);
     let response = admin_client
         .send(request, None)
         .await
@@ -171,8 +172,7 @@ async fn test_create_users() {
         &regular_user_client,
         &regular_user_client_with_custom_password,
     ] {
-        let request =
-            synapse_admin_api::users::get_details::v2::Request::new(regular_user_id.as_ref());
+        let request = synapse_admin_api::users::get_details::v2::Request::new(&regular_user_id);
         client
             .send(request, None)
             .await
@@ -222,6 +222,50 @@ async fn test_repeat() {
             .await
             .expect("Failed in step `down`");
     }
+}
+
+/// Simple test: repeat numerous times up/down, to increase the
+/// chances of hitting one the cases in which Synapse fails
+/// during startup.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_empty_appservice() {
+    let docker = DOCKER.clone();
+    let config = Config::builder()
+        .name("test-appservice".into())
+        .synapse(SynapseVersion::Docker {
+            tag: SYNAPSE_VERSION.into(),
+        })
+        .appservices(
+            AllAppservicesConfig::builder()
+                .host(vec![AppServiceConfig::builder()
+                    .name("some-appservice".into())
+                    .url("http://host:8888".parse().unwrap())
+                    .sender_localpart("_ghost".into())
+                    .extra_fields(dict!(HashMap::new(), { "another-field" => 0 }))
+                    .build()])
+                .build(),
+        )
+        .build()
+        .assign_port();
+    let _ = Cleanup::new(&config);
+    mx_tester::build(&docker, &config)
+        .await
+        .expect("Failed in step `build`");
+    mx_tester::up(&docker, &config).await.expect_err(
+        "Step `up` should not be able to complete as we don't really have an appservice",
+    );
+    let path = config.generated_appservice_path("some-appservice");
+    let generated = std::fs::read_to_string(&path)
+        .with_context(|| format!("Could not read appservice file at {:?}", path))
+        .unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&generated)
+        .with_context(|| format!("Could not parse appservice file at {:?}", path))
+        .unwrap();
+    assert_eq!(
+        yaml["url"],
+        serde_yaml::Value::from("http://localhost:8888/"),
+    );
+    assert_eq!(yaml["another-field"], serde_yaml::Value::from(0));
 }
 
 /*
