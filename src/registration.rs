@@ -229,7 +229,8 @@ async fn ensure_user_exists(
         .build()
         .await?;
     match client
-        .login(&user.localname, &user.password, None, None)
+        .login_username(&user.localname, &user.password)
+        .send()
         .await
     {
         Ok(_) => return Ok(client),
@@ -245,7 +246,8 @@ async fn ensure_user_exists(
     }
     register_user(base_url, registration_shared_secret, user).await?;
     client
-        .login(&user.localname, &user.password, None, None)
+        .login_username(&user.localname, &user.password)
+        .send()
         .await?;
     Ok(client)
 }
@@ -276,11 +278,8 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
         // If the user is not rate limited, remove the rate limit.
         if let RateLimit::Unlimited = user.rate_limit {
             use override_rate_limits::*;
-            let user_id = client
-                .user_id()
-                .await
-                .expect("Client doesn't have a user id");
-            let request = Request::new(&user_id, Some(0), Some(0));
+            let user_id = client.user_id().expect("Client doesn't have a user id");
+            let request = Request::new(user_id, Some(0), Some(0));
             let _ = admin.send(request, None).await?;
         }
 
@@ -294,7 +293,7 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
             continue;
         }
         let client = clients.get(&user.localname).unwrap(); // We just inserted it.
-        let my_user_id = client.user_id().await.ok_or_else(|| {
+        let my_user_id = client.user_id().ok_or_else(|| {
             anyhow!(
                 "Cannot determine full user id for own user {}.",
                 user.localname
@@ -312,7 +311,7 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
                 );
             }
             if let Some(ref name) = room.name {
-                request.name = Some(TryFrom::<&str>::try_from(name.as_str())?);
+                request.name = Some(name.as_str());
             }
             if let Some(ref alias) = room.alias {
                 if !aliases.insert(alias) {
@@ -364,13 +363,12 @@ pub async fn handle_user_registration(config: &crate::Config) -> Result<(), Erro
                 })?;
                 let user_id = member_client
                     .user_id()
-                    .await
                     .ok_or_else(|| anyhow!("Cannot determine full user id for user {}.", member))?;
                 if my_user_id == user_id {
                     // Don't invite oneself.
                     continue;
                 }
-                invites.push(user_id);
+                invites.push(user_id.to_owned());
             }
             request.invite = &invites;
             let room_id = client.create_room(request).await?.room_id;

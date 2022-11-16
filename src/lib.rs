@@ -1163,7 +1163,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
         &config.logs_dir().join("workers"),
         &modules_log_dir,
     ] {
-        std::fs::create_dir_all(&dir)
+        std::fs::create_dir_all(dir)
             .with_context(|| format!("Could not create directory {:#?}", dir,))?;
     }
 
@@ -1231,7 +1231,7 @@ pub async fn build(docker: &Docker, config: &Config) -> Result<(), Error> {
             ),
         ];
         for (path, content) in &data {
-            std::fs::write(&path, content).with_context(|| {
+            std::fs::write(path, content).with_context(|| {
                 format!("Could not inject worker configuration file {:?}", path)
             })?;
         }
