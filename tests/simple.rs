@@ -97,7 +97,8 @@ async fn test_create_users() {
         .await
         .unwrap();
     regular_user_client
-        .login(&regular_user.localname, &regular_user.password, None, None)
+        .login_username(&regular_user.localname, &regular_user.password)
+        .send()
         .await
         .expect("Could not login as regular user");
     let regular_user_id = regular_user_client
@@ -116,12 +117,11 @@ async fn test_create_users() {
         .await
         .unwrap();
     regular_user_client_with_custom_password
-        .login(
+        .login_username(
             &regular_user_with_custom_password.localname,
             &regular_user_with_custom_password.password,
-            None,
-            None,
         )
+        .send()
         .await
         .expect("Could not login as regular user");
     let regular_user_client_with_custom_password_user_id = regular_user_client_with_custom_password
@@ -142,7 +142,8 @@ async fn test_create_users() {
         .await
         .unwrap();
     admin_client
-        .login(&admin.localname, &admin.password, None, None)
+        .login_username(&admin.localname, &admin.password)
+        .send()
         .await
         .expect("Could not login as admin");
     let admin_user_id = admin_client
