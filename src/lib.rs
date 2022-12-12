@@ -1474,15 +1474,17 @@ pub async fn up(docker: &Docker, config: &Config) -> Result<(), Error> {
     let setup_container_name = config.setup_container_name();
     let run_container_name = config.run_container_name();
 
-    // Create the synapse data directory.
+    // (Re)create the synapse data directory.
     // We'll use it as volume.
     let synapse_data_directory = config.synapse_data_dir();
+    if let Err(err) = std::fs::remove_dir_all(&synapse_data_directory) {
+        warn!(
+            "Failed to remove directory {:?}: {err:?}",
+            synapse_data_directory
+        );
+    }
     std::fs::create_dir_all(&synapse_data_directory)
         .with_context(|| format!("Cannot create directory {:#?}", synapse_data_directory))?;
-
-    // Cleanup leftovers.
-    let homeserver_path = synapse_data_directory.join("homeserver.yaml");
-    let _ = std::fs::remove_file(&homeserver_path);
 
     // Start a container to generate homeserver.yaml.
     start_synapse_container(
