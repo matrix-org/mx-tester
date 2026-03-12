@@ -11,12 +11,18 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions: {}
+
 jobs:
   build:
     name: Build and test
     runs-on: ubuntu-latest
+    permissions:
+        contents: read
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      with:
+        persist-credentials: false
     - name: Build
       run: cargo build --verbose
     - name: Run tests
@@ -24,8 +30,12 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      with:
+        persist-credentials: false
     - name: Code linter
       run: cargo clippy -- -D warnings
     - name: Style linter
