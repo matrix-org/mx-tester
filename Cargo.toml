@@ -10,7 +10,7 @@ repository = "https://github.com/matrix-org/mx-tester"
 # Command-line
 clap = { version = "3.1", features = ["cargo"] }
 comma = "1.0"
-ezexec = "0.3"
+ezexec = "0.4"
 shellexpand = "2.1"
 
 # Configuration
