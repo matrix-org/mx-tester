@@ -72,3 +72,12 @@ synapse-admin-api = {version = "0.5", features = ["client"] }
 client = []
 server = []
 default = ["client"]
+
+[lints.rust]
+unexpected_cfgs = "allow"
+dead_code = "allow"
+
+[lints.clippy]
+useless_conversion = "allow"
+redundant_guards = "allow"
+derivable_impls = "allow"
