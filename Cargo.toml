@@ -53,7 +53,7 @@ lazy_static = "1.4"
 typed-builder = "0.11"
 
 # Unix manipulation
-nix = "0.25"
+nix = "0.31"
 
 # Docker
 bollard = { version = "0.13", features = ["ssl"] }
