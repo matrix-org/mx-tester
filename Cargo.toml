@@ -57,7 +57,7 @@ nix = "0.25"
 
 # Docker
 bollard = { version = "0.13", features = ["ssl"] }
-hyper = "0.14"
+hyper = "1.2"
 tar = "0.4"
 
 [dev-dependencies]
